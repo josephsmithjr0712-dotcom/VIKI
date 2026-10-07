@@ -3,14 +3,20 @@ import re
 import json
 import urllib.parse
 import urllib.request
-
+from ddgs import DDGS 
+from matplotlib import text
 import ollama
 from dotenv import load_dotenv
+import asyncio
+import edge_tts
+import pygame
 
 SYSTEM_PROMPT = (
     "You are VIKI, a helpful AI assistant. Answer questions directly with text. "
     "Only use a tool when the user explicitly asks for what that tool provides "
-    "(for example, weather or a forecast)."
+    "(for example, weather, forecasts, or research). "
+    "NEVER output raw JSON, code blocks, or tool schemas in your conversational text. "
+    "If you need to use a tool, you must invoke the built-in tool calling function silently."
 )
 
 MAX_TOOL_ROUNDS = 3
@@ -18,7 +24,7 @@ MAX_TOOL_ROUNDS = 3
 # Small models over-call tools, so we only offer the weather tool when the
 # prompt actually looks like a weather question.
 WEATHER_PATTERN = re.compile(
-    r"\b(weather|temperature|forecast|rain(ing)?|snow(ing)?|humidity|windy|degrees)\b",
+    r"\b(weather|temperature|forecast|rain(ing)?|snow(ing)?|humidity|windy|degrees|research|search|lookup|find|who|what|where)\b",
     re.IGNORECASE,
 )
 
@@ -68,8 +74,23 @@ def get_current_weather(location: str, unit: str = "Fahrenheit") -> str:
     except Exception as e:
         return f"Weather lookup failed for {location}: {e}"
 
+def research_tool(topic: str) -> str:
+    """Pulls search results from DuckDuckGo and returns a summary of the top results."""
+    try:
+        # Added backend="lite" to bypass the bot-blocking causing empty results
+        results = DDGS().text(topic, max_results=5, backend="lite")
+        summaries = []
+        for result in results:
+            title = result.get('title', 'No title')
+            snippet = result.get('body', 'No snippet')
+            url = result.get('href', 'No URL')
+            summaries.append(f"Title: {title}\nSnippet: {snippet}\nURL: {url}\n")
+        return "\n".join(summaries) if summaries else f"No results found for '{topic}'."
+    except Exception as e:
+        return f"Research lookup failed for '{topic}': {e}"
 
-TOOL_REGISTRY = {"get_current_weather": get_current_weather}
+
+TOOL_REGISTRY = {"get_current_weather": get_current_weather, "research_tool": research_tool}
 
 
 class VIKI:
@@ -100,6 +121,27 @@ class VIKI:
                             },
                         },
                         "required": ["location"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "research_tool",  # CHANGED: No spaces, matches TOOL_REGISTRY key
+                    "description": (
+                        "Lets you call for current information in the world by extracting it from various sources. "
+                        "ONLY use if the user explicitly asks about a specific topic or "
+                        "to research something. NEVER use for general questions or conversations."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "topic": {
+                                "type": "string",
+                                "description": "The topic to research",
+                            },
+                        },
+                        "required": ["topic"],
                     },
                 },
             }
@@ -174,6 +216,44 @@ class VIKI:
         facts = data.get("facts", []) if isinstance(data, dict) else []
         return [f for f in facts if isinstance(f, str)]
 
+
+
+
+    def generate_audio(self, text: str):
+        """Converts response text to speech and plays it using edge_tts and pygame."""
+        if not text:
+            return
+
+        voice = "en-US-AvaMultilingualNeural"
+        output_file = "viki_output.mp3"
+
+        async def _speak():
+            communicate = edge_tts.Communicate(text=text, voice=voice)
+            await communicate.save(output_file)
+
+        try:
+            # 1. Run the async edge_tts generator synchronously
+            asyncio.run(_speak())
+
+            # 2. Initialize and play audio with Pygame
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+
+            pygame.mixer.music.load(output_file)
+            pygame.mixer.music.play()
+
+            # 3. Wait for playback to complete so it doesn't cut off
+            clock = pygame.time.Clock()
+            while pygame.mixer.music.get_busy():
+                clock.tick(10)
+
+            # 4. Unload music so the file isn't locked for the next turn
+            pygame.mixer.music.unload()
+
+        except Exception as e:
+            print(f"TTS Error: {e}")
+
+
     def viki_response(self, prompt: str, enable_tools: bool = True,
                       history=None, on_event=None, think: bool = False,
                       memory=None):
@@ -227,6 +307,8 @@ class VIKI:
                     content = content.strip()
                     if executed and not content:
                         content = executed[-1]["result"]
+                    #generate audio for the final response
+                    self.generate_audio(content)
                     return {
                         "type": "tool_call" if executed else "text",
                         "content": content,

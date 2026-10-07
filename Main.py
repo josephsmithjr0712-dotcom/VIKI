@@ -258,7 +258,7 @@ def main():
     viki = VIKI()  # create once, not on every prompt
     store = SessionStore()
     session = Session()
-    thinking_on = True
+    thinking_on = False
     banner(thinking_on, store)
 
     try:
