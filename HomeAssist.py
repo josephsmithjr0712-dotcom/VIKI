@@ -1,0 +1,1 @@
+import homeassistant as ha_core
