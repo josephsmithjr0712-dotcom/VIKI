@@ -1,0 +1,21 @@
+# VIKI — never commit secrets or local state.
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# OAuth tokens and API secrets (re-created per machine via auth flows).
+connectors/*token*.json
+connectors/client_secrets.json
+connectors/spotify_cache*
+
+# Runtime data: sessions, memory, workspace files, backups.
+workspace/
+memory/
+backups/
+*.log
+
+# OS / editor noise.
+.DS_Store
+.idea/
+.vscode/
