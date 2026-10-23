@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # update-viki.sh — one-command VIKI update for the HomeLab server (Debian + systemd).
 #
-#   ./update-viki.sh            update and restart, no questions asked
-#   ./update-viki.sh --dry-run  show what would happen, change nothing
+#   bash update-viki.sh            update and restart, no questions asked
+#   bash update-viki.sh --dry-run  show what would happen, change nothing
+#
+# (Run it via bash, not ./ — the GitHub push path doesn't preserve the
+# executable bit, so don't count on chmod +x surviving a fresh clone.)
 #
 # What it does:
 #   1. Stashes any dirty local changes (tracked AND untracked, tagged with a

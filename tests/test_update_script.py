@@ -1,5 +1,4 @@
 """Tests for update-viki.sh: the one-command HomeLab server updater."""
-import os
 import shutil
 import subprocess
 import unittest
@@ -9,9 +8,19 @@ SCRIPT = Path(__file__).resolve().parent.parent / "update-viki.sh"
 
 
 class TestUpdateScript(unittest.TestCase):
-    def test_script_exists_and_is_executable(self):
+    def test_script_exists(self):
         self.assertTrue(SCRIPT.is_file(), "update-viki.sh missing from repo root")
-        self.assertTrue(os.access(SCRIPT, os.X_OK), "update-viki.sh is not executable")
+
+    def test_runs_via_bash(self):
+        # The push path strips the executable bit, so the supported
+        # invocation is `bash update-viki.sh`; assert that works.
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "bash not found")
+        result = subprocess.run(
+            [bash, str(SCRIPT), "--help"], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"bash invocation failed:\n{result.stderr}")
+        self.assertIn("--dry-run", result.stdout)
 
     def test_syntax_valid(self):
         bash = shutil.which("bash")
