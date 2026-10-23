@@ -270,10 +270,24 @@ def home_assistant(action, entity_id="", domain="", service="", data=None):
 
 
 # --- registry ---------------------------------------------------------------
-def _spec(name, desc, props=None, required=(), risky=False):
-    return {"risky": risky, "schema": {"type": "function", "function": {
+def _spec(name, desc, props=None, required=(), risky=False, risky_if=None):
+    """risky_if: optional callable(args_dict) -> bool for argument-aware approval
+    (used when only some calls of a tool are dangerous)."""
+    return {"risky": risky, "risky_if": risky_if, "schema": {"type": "function", "function": {
         "name": name, "description": desc,
         "parameters": {"type": "object", "properties": props or {}, "required": list(required)}}}}
+
+
+# HA domains where a `call` action is security-sensitive (physical security /
+# access control) and must ask for approval again, even though the general HA
+# approval gate was removed. Everything else acts directly.
+SECURE_HA_DOMAINS = frozenset({"lock", "alarm_control_panel", "cover"})
+
+
+def _ha_call_needs_approval(args):
+    args = args or {}
+    return args.get("action") == "call" and \
+        str(args.get("domain", "")).strip().lower() in SECURE_HA_DOMAINS
 
 
 S = lambda d: {"type": "string", "description": d}
@@ -290,8 +304,8 @@ SPECS = {
     "read_file": _spec("read_file", "Read a text file from the workspace.", {"path": S("relative path")}, ["path"]),
     "write_file": _spec("write_file", "Create or overwrite a text file in the workspace (notes, drafts, reports). Needs user approval.",
         {"path": S("relative path"), "content": S("file text")}, ["path", "content"], risky=True),
-    "home_assistant": _spec("home_assistant", "Control Home Assistant. Actions: list (compact entity list - call FIRST when unsure what exists), dump (FULL details of all entities with every attribute, or one entity if entity_id given), state (read one entity), call (run a service). Common domains/services: light.turn_on/turn_off/toggle (data: brightness_pct, color_name, rgb_color), switch.turn_on/turn_off/toggle, climate.set_temperature (data: temperature), media_player.play_media/volume_set/media_play_pause, script.turn_on, automation.trigger. No approval needed - act directly.",
-        {"action": S("list, state, dump, or call"), "entity_id": S("e.g. light.living_room_lamp (required for state/call; optional filter for dump; omit for list)"), "domain": S("e.g. light (required for call)"), "service": S("e.g. turn_on (required for call)"), "data": S("optional JSON object, e.g. {\"brightness_pct\": 50}")}, ["action"]),
+    "home_assistant": _spec("home_assistant", "Control Home Assistant. Actions: list (compact entity list - call FIRST when unsure what exists), dump (FULL details of all entities with every attribute, or one entity if entity_id given), state (read one entity), call (run a service). Common domains/services: light.turn_on/turn_off/toggle (data: brightness_pct, color_name, rgb_color), switch.turn_on/turn_off/toggle, climate.set_temperature (data: temperature), media_player.play_media/volume_set/media_play_pause, script.turn_on, automation.trigger. No approval needed - act directly, EXCEPT call actions on lock, alarm_control_panel, or cover domains (door locks, alarms, blinds/garage doors), which need user approval.",
+        {"action": S("list, state, dump, or call"), "entity_id": S("e.g. light.living_room_lamp (required for state/call; optional filter for dump; omit for list)"), "domain": S("e.g. light (required for call)"), "service": S("e.g. turn_on (required for call)"), "data": S("optional JSON object, e.g. {\"brightness_pct\": 50}")}, ["action"], risky_if=_ha_call_needs_approval),
     "gmail_search": _spec("gmail_search", "Search the user's Gmail. Returns message ids, senders, subjects, and snippets; use gmail_read for the full text.",
         {"query": S("Gmail search query, e.g. 'from:amazon subject:receipt'"), "max_results": S("max results (default 5)")}, ["query"]),
     "gmail_read": _spec("gmail_read", "Read a full Gmail message by id (get ids from gmail_search).",
@@ -457,7 +471,11 @@ class Toolbox:
         return [SPECS[n]["schema"] for n in self.enabled]
 
     def needs_approval(self, name, args):
-        return SPECS.get(name, {}).get("risky")
+        spec = SPECS.get(name, {})
+        if spec.get("risky"):
+            return True
+        cond = spec.get("risky_if")
+        return bool(cond(args or {}) if cond else False)
 
     def run(self, name, args):
         fn = self.funcs.get(name) if name in self.enabled else None
