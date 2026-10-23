@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VIKI — Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#05060F;--violet:#8B6CFF;--indigo:#4F6BFF;--cyan:#2EE6F5;--pink:#FF6FB5;
+--text:rgba(255,255,255,.95);--dim:rgba(255,255,255,.6);--faint:rgba(255,255,255,.38);--red:#FF5D6C;
+--font:'Manrope',system-ui,-apple-system,'Segoe UI',sans-serif}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{font:15px/1.6 var(--font);color:var(--text);background:var(--ink);overflow:hidden;display:grid;place-items:center}
+.aurora{position:fixed;inset:0;z-index:0;overflow:hidden;background:var(--ink)}
+.aurora i{position:absolute;border-radius:50%;filter:blur(70px);opacity:.6;animation:drift 26s ease-in-out infinite alternate}
+.aurora i:nth-child(1){width:75vw;height:75vw;left:-15vw;top:-20vh;background:radial-gradient(circle,rgba(139,108,255,.65),transparent 70%)}
+.aurora i:nth-child(2){width:60vw;height:60vw;left:55vw;top:25vh;background:radial-gradient(circle,rgba(46,230,245,.42),transparent 70%);animation-delay:-7s}
+.aurora i:nth-child(3){width:70vw;height:70vw;left:-10vw;top:60vh;background:radial-gradient(circle,rgba(255,111,181,.38),transparent 70%);animation-delay:-13s}
+@keyframes drift{to{transform:translate(6vw,5vh) scale(1.12)}}
+.vignette{position:fixed;inset:0;z-index:1;pointer-events:none;background:linear-gradient(rgba(0,0,0,.4),rgba(0,0,0,.07) 40%,rgba(0,0,0,.53))}
+.card{position:relative;z-index:2;width:min(360px,90vw);border-radius:28px;padding:36px 30px;text-align:center;
+background:linear-gradient(135deg,rgba(255,255,255,.16),rgba(255,255,255,.06) 45%,rgba(255,255,255,.10));background-color:rgba(7,8,20,.08);
+border:1px solid rgba(255,255,255,.2);backdrop-filter:blur(28px) saturate(170%);-webkit-backdrop-filter:blur(28px) saturate(170%);
+box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 20px 50px -20px rgba(0,0,0,.6)}
+.orb{width:96px;height:96px;margin:0 auto 20px;position:relative;animation:breathe 2.6s ease-in-out infinite}
+@keyframes breathe{50%{transform:scale(1.05)}}
+.orb .disc{position:absolute;inset:12%;border-radius:50%;background:conic-gradient(from 0deg,var(--violet),var(--cyan),var(--pink),var(--indigo),var(--violet));animation:spin 9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.orb .sheen{position:absolute;inset:12%;border-radius:50%;background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.55),transparent 45%)}
+h1{font-size:24px;font-weight:600;margin-bottom:4px}
+p{color:var(--dim);font-size:13px;margin-bottom:22px}
+input{width:100%;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.16);border-radius:14px;padding:12px 14px;color:var(--text);font:inherit;font-size:15px;outline:0;margin-bottom:10px}
+input:focus{border-color:var(--violet);box-shadow:0 0 0 3px rgba(139,108,255,.2)}
+button{width:100%;border:0;border-radius:14px;padding:12px;font:inherit;font-weight:700;color:#fff;cursor:pointer;
+background:linear-gradient(135deg,var(--violet),var(--indigo))}
+button:active{transform:scale(.98)}
+.remember{display:flex;align-items:center;gap:8px;justify-content:center;margin:12px 0 0;color:var(--dim);font-size:13px;cursor:pointer}
+.remember input{width:auto;margin:0;accent-color:var(--violet)}
+.err{color:var(--red);font-size:13px;min-height:20px;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="aurora"><i></i><i></i><i></i></div>
+<div class="vignette"></div>
+<div class="card">
+  <div class="orb"><div class="disc"></div><div class="sheen"></div></div>
+  <h1>VIKI</h1>
+  <p>Enter your password to continue</p>
+  <form id="f">
+    <input type="password" id="pw" placeholder="Password" autocomplete="current-password" autofocus>
+    <button type="submit">Sign in</button>
+    <label class="remember"><input type="checkbox" id="rm" checked> Keep me signed in on this device</label>
+  </form>
+  <div class="err" id="err"></div>
+</div>
+<script>
+document.getElementById('f').onsubmit = async e => {
+  e.preventDefault();
+  const pw = document.getElementById('pw').value;
+  const remember = document.getElementById('rm').checked;
+  const err = document.getElementById('err');
+  err.textContent = '';
+  try {
+    const r = await fetch('/login', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: pw, remember})});
+    const d = await r.json();
+    if (d.ok) { location.href = '/'; }
+    else { err.textContent = d.error || 'Sign in failed'; }
+  } catch(ex) { err.textContent = 'Could not reach the server'; }
+};
+</script>
+</body>
+</html>
