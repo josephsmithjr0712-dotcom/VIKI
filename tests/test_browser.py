@@ -78,5 +78,72 @@ class TestBrowserTools(TestCase):
         self.assertFalse(tb.needs_approval("browser_goto", {"url": "https://example.com"}))
 
 
+class TestGotoUrlValidation(TestCase):
+    """browser_goto only allows http(s) URLs with a real host."""
+
+    def goto_with(self, url):
+        sess = mock_session()
+        with patch.object(b, "_session", sess):
+            out = b.browser_goto(url)
+        return out, sess
+
+    def test_valid_https_passes_through(self):
+        out, sess = self.goto_with("https://example.com/page")
+        sess.goto.assert_called_once_with("https://example.com/page")
+        self.assertIn("Example", out)
+
+    def test_valid_http_passes_through(self):
+        _, sess = self.goto_with("http://192.168.1.10:8123")
+        sess.goto.assert_called_once_with("http://192.168.1.10:8123")
+
+    def test_uppercase_scheme_allowed(self):
+        _, sess = self.goto_with("HTTPS://example.com")
+        sess.goto.assert_called_once_with("HTTPS://example.com")
+
+    def test_whitespace_stripped(self):
+        _, sess = self.goto_with("  https://example.com  ")
+        sess.goto.assert_called_once_with("https://example.com")
+
+    def test_javascript_blocked(self):
+        out, sess = self.goto_with("javascript:alert(1)")
+        sess.goto.assert_not_called()
+        self.assertIn("Invalid URL", out)
+
+    def test_data_blocked(self):
+        out, sess = self.goto_with("data:text/html,<h1>x</h1>")
+        sess.goto.assert_not_called()
+        self.assertIn("Invalid URL", out)
+
+    def test_file_blocked(self):
+        out, sess = self.goto_with("file:///etc/passwd")
+        sess.goto.assert_not_called()
+        self.assertIn("Invalid URL", out)
+
+    def test_no_host_rejected(self):
+        out, sess = self.goto_with("https:///no-host")
+        sess.goto.assert_not_called()
+        self.assertIn("Invalid URL", out)
+
+    def test_empty_rejected(self):
+        out, sess = self.goto_with("   ")
+        sess.goto.assert_not_called()
+        self.assertIn("Invalid URL", out)
+
+    def test_non_string_rejected(self):
+        out, sess = self.goto_with(None)
+        sess.goto.assert_not_called()
+        self.assertIn("Invalid URL", out)
+
+    def test_too_long_rejected(self):
+        out, sess = self.goto_with("https://example.com/" + "a" * 3000)
+        sess.goto.assert_not_called()
+        self.assertIn("Invalid URL", out)
+
+    def test_validate_helper_direct(self):
+        with self.assertRaises(ValueError):
+            b._validate_url("ftp://example.com")
+        self.assertEqual(b._validate_url("https://Example.COM/x"), "https://Example.COM/x")
+
+
 if __name__ == "__main__":
     main(verbosity=2)

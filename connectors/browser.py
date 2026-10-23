@@ -13,9 +13,35 @@ across tool calls within a server run. Playwright is imported lazily so
 VIKI works without it until these tools are used.
 """
 from pathlib import Path
+from urllib.parse import urlsplit
 
 WORK_DIR = Path(__file__).resolve().parent.parent / "workspace" / "browser"
 _session = None
+
+MAX_URL_LEN = 2048
+ALLOWED_SCHEMES = ("http", "https")
+
+
+def _validate_url(url):
+    """Return the cleaned URL, or raise ValueError if it is unsafe/invalid.
+
+    Only http:// and https:// are allowed -- this blocks javascript:,
+    data:, file:, and other schemes that could escape the browser context
+    or touch local files.
+    """
+    if not isinstance(url, str):
+        raise ValueError("URL must be a string")
+    url = url.strip()
+    if not url:
+        raise ValueError("empty URL")
+    if len(url) > MAX_URL_LEN:
+        raise ValueError(f"URL too long (max {MAX_URL_LEN} chars)")
+    parts = urlsplit(url)
+    if parts.scheme.lower() not in ALLOWED_SCHEMES:
+        raise ValueError(f"only http:// and https:// are allowed (got {parts.scheme!r})")
+    if not parts.hostname:
+        raise ValueError("URL has no host")
+    return url
 
 
 class BrowserSession:
@@ -108,6 +134,10 @@ def _run(fn, *args, **kwargs):
 
 
 def browser_goto(url):
+    try:
+        url = _validate_url(url)
+    except ValueError as e:
+        return f"Invalid URL: {e}"
     return _run(_browser().goto, url)
 
 
