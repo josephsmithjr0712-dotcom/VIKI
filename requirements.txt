@@ -1,0 +1,12 @@
+ollama>=0.4
+flask>=3.0
+python-dotenv>=1.0
+ddgs>=9.0
+google-api-python-client>=2.0
+google-auth-oauthlib>=1.0
+playwright>=1.40  # plus: python -m playwright install chromium
+pychromecast>=13.0  # Google Home Mini announcements
+plexapi>=4.15  # Plex connector
+spotipy>=2.25  # Spotify connector
+cryptography==42.0.0  # Intel Mac: newer versions lack x86_64 wheels, this one has it
+edge-tts>=7.0  # Microsoft neural TTS (Aria US female default)
