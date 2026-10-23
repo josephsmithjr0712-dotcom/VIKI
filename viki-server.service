@@ -1,0 +1,14 @@
+[Unit]
+Description=VIKI web UI
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/viki
+EnvironmentFile=/opt/viki/.env
+ExecStart=/opt/viki/.venv/bin/python server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
