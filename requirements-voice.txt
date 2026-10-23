@@ -1,0 +1,9 @@
+# VIKI hands-free voice stack — all local, no cloud services.
+# Install on the machine with the microphone + speakers
+# (the web UI's browser mic keeps working without any of this).
+openwakeword>=0.6      # wake-word detection ("hey jarvis" built in)
+faster-whisper>=1.0    # speech to text, fast on CPU
+piper-tts>=1.2         # neural text to speech, local
+sounddevice>=0.4       # mic + speaker I/O (needs portaudio on the system)
+soundfile>=0.12        # wav playback helper
+numpy>=1.24
