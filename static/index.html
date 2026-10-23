@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VIKI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#05060F; --violet:#8B6CFF; --indigo:#4F6BFF; --cyan:#2EE6F5; --pink:#FF6FB5;
+  --mint:#46F2B0; --amber:#FFC857; --red:#FF5D6C;
+  --text:rgba(255,255,255,.95); --dim:rgba(255,255,255,.6); --faint:rgba(255,255,255,.38);
+  --font:'Manrope',system-ui,-apple-system,'Segoe UI',sans-serif; --mono:'JetBrains Mono',ui-monospace,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{font:15px/1.6 var(--font);color:var(--text);background:var(--ink);overflow:hidden}
+/* --- Aurora backdrop --- */
+.aurora{position:fixed;inset:0;z-index:0;overflow:hidden;background:var(--ink)}
+.aurora i{position:absolute;border-radius:50%;filter:blur(70px);opacity:.6;animation:drift 26s ease-in-out infinite alternate}
+.aurora i:nth-child(1){width:75vw;height:75vw;left:-15vw;top:-20vh;background:radial-gradient(circle,rgba(139,108,255,.65),transparent 70%)}
+.aurora i:nth-child(2){width:60vw;height:60vw;left:55vw;top:25vh;background:radial-gradient(circle,rgba(46,230,245,.42),transparent 70%);animation-delay:-7s}
+.aurora i:nth-child(3){width:70vw;height:70vw;left:-10vw;top:60vh;background:radial-gradient(circle,rgba(255,111,181,.38),transparent 70%);animation-delay:-13s}
+.aurora i:nth-child(4){width:55vw;height:55vw;left:45vw;top:75vh;background:radial-gradient(circle,rgba(79,107,255,.35),transparent 70%);animation-delay:-19s}
+@keyframes drift{to{transform:translate(6vw,5vh) scale(1.12)}}
+.vignette{position:fixed;inset:0;z-index:1;pointer-events:none;background:linear-gradient(rgba(0,0,0,.4),rgba(0,0,0,.07) 40%,rgba(0,0,0,.53))}
+/* --- Glass primitives --- */
+.glass{background:linear-gradient(135deg,rgba(255,255,255,.16),rgba(255,255,255,.06) 45%,rgba(255,255,255,.10));background-color:rgba(7,8,20,.08);
+  border:1px solid transparent;border-image:linear-gradient(135deg,rgba(255,255,255,.4),rgba(255,255,255,.06),rgba(255,255,255,.2)) 1;
+  backdrop-filter:blur(28px) saturate(170%);-webkit-backdrop-filter:blur(28px) saturate(170%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 20px 50px -20px rgba(0,0,0,.6)}
+button{font:inherit;color:inherit;cursor:pointer;background:none;border:0}
+/* --- App frame --- */
+.app{position:relative;z-index:2;height:100%;max-width:560px;margin:0 auto;display:flex;flex-direction:column;padding:0 0 8px}
+/* --- Top bar --- */
+.topbar{display:flex;align-items:center;gap:10px;padding:14px 16px 10px}
+.topbar h1{font-size:22px;font-weight:600;letter-spacing:-.01em;flex:1}
+.pill{display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:99px;font-size:12px;font-weight:500}
+.pill .sdot{width:8px;height:8px;border-radius:50%;background:var(--mint);box-shadow:0 0 8px var(--mint)}
+.pill.off .sdot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+.iconbtn{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font-size:20px;flex:none}
+/* --- Tabs --- */
+main{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
+.tabpane{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.tabpane[hidden]{display:none}
+/* --- Chat feed --- */
+#feed{flex:1;overflow-y:auto;padding:8px 14px 16px;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth}
+/* Empty state */
+.empty{margin:auto;text-align:center;display:flex;flex-direction:column;align-items:center;padding:20px 0;max-width:420px}
+/* The orb */
+.orb{width:170px;height:170px;position:relative;flex:none;animation:breathe 2.6s ease-in-out infinite}
+@keyframes breathe{50%{transform:scale(1.04)}}
+.orb .glow{position:absolute;inset:-25%;border-radius:50%;background:radial-gradient(circle,rgba(139,108,255,.55),transparent 70%);filter:blur(24px)}
+.orb .disc{position:absolute;inset:12%;border-radius:50%;overflow:hidden;
+  background:conic-gradient(from 0deg,var(--violet),var(--cyan),var(--pink),var(--indigo),var(--violet));
+  animation:spin 9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.orb .sheen{position:absolute;inset:12%;border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.55),transparent 45%)}
+.orb .rim{position:absolute;inset:12%;border-radius:50%;border:2px solid rgba(0,0,0,.13);pointer-events:none}
+body.thinking .orb .disc{animation-duration:2.2s}
+.empty h2{font-size:34px;font-weight:600;letter-spacing:-.02em;margin:26px 0 6px}
+.empty p{color:var(--dim);font-size:14px;padding:0 40px}
+.chips{display:flex;gap:8px;overflow-x:auto;padding:28px 16px 4px;max-width:100%;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;padding:10px 16px;border-radius:99px;font-size:14px;font-weight:500;white-space:nowrap}
+/* Messages */
+.msg{max-width:88%;display:flex;flex-direction:column;gap:8px}
+.msg.user{align-self:flex-end}
+.bubble{padding:11px 16px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;font-size:15px}
+.user .bubble{border-radius:22px 22px 6px 22px;background:linear-gradient(135deg,rgba(139,108,255,.85),rgba(79,107,255,.75));border:1px solid rgba(255,255,255,.33)}
+.agent .bubble{border-radius:22px 22px 22px 6px;white-space:normal}
+.bubble p+p,.bubble ul,.bubble pre{margin-top:8px}.bubble ul{padding-left:20px}
+.bubble a{color:var(--cyan)}
+.bubble code{font:13px var(--mono);background:rgba(0,0,0,.3);padding:1px 6px;border-radius:6px}
+.bubble pre{background:rgba(0,0,0,.4);border-radius:12px;padding:12px;overflow:auto}.bubble pre code{background:none;padding:0}
+.ts{font-size:11px;color:var(--faint)}
+.msg.user .ts{align-self:flex-end}
+.cursor::after{content:"";display:inline-block;width:7px;height:15px;margin-left:3px;background:var(--cyan);vertical-align:-2px;animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+.think{font-size:13px;color:var(--dim);border-left:2px solid var(--violet);padding:2px 12px;font-style:italic;max-height:140px;overflow:auto}
+.plan{border-radius:18px;padding:14px 16px}
+.plan h4{font-size:13px;color:var(--dim);margin-bottom:8px;font-weight:600}
+.plan li{list-style:none;display:flex;gap:10px;align-items:baseline;font-size:14px;padding:3px 0}
+.plan li i{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--dim);flex:none;position:relative;top:2px}
+.plan li.doing i{border-color:var(--amber);background:radial-gradient(var(--amber) 40%,transparent 45%);animation:pulse 1.2s infinite}
+.plan li.done i{background:var(--mint);border-color:var(--mint)}.plan li.done{color:var(--dim);text-decoration:line-through}
+@keyframes pulse{50%{transform:scale(1.4);opacity:.5}}
+details.tool{border-radius:14px;font-size:13px}
+details.tool summary{cursor:pointer;padding:9px 13px;display:flex;gap:10px;align-items:center;list-style:none}
+details.tool summary::-webkit-details-marker{display:none}
+.tn{font:500 12.5px var(--mono);color:var(--cyan)}.ta{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.spin{width:12px;height:12px;border:2px solid rgba(255,255,255,.2);border-top-color:var(--cyan);border-radius:50%;animation:rot .8s linear infinite;flex:none}
+details.tool.ok .spin{animation:none;border:0;background:var(--mint);border-radius:50%;width:8px;height:8px}
+@keyframes rot{to{transform:rotate(360deg)}}
+details.tool pre{font:12px/1.5 var(--mono);color:var(--dim);padding:0 13px 12px;white-space:pre-wrap;max-height:220px;overflow:auto}
+.approve{border-radius:18px;padding:14px 16px}
+.approve p{font-size:14px;margin-bottom:10px}.approve code{font:12px var(--mono);color:var(--amber);display:block;white-space:pre-wrap;margin:6px 0 12px;max-height:140px;overflow:auto}
+.approve .row{display:flex;gap:10px}
+.btn{border-radius:14px;padding:10px 18px;font-weight:600}
+.btn.primary{background:linear-gradient(135deg,var(--violet),var(--indigo));color:#fff}
+.err{color:var(--red)}
+/* --- Input bar --- */
+.inputbar{display:flex;gap:8px;align-items:flex-end;padding:8px 12px}
+.hfbtn{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;flex:none;font-size:20px}
+.hfbtn.active{background:linear-gradient(135deg,rgba(46,230,245,.5),rgba(46,230,245,.25));border-color:rgba(46,230,245,.6)}
+.inpill{flex:1;display:flex;align-items:flex-end;gap:4px;border-radius:26px;padding:4px 6px 4px 18px;min-height:52px}
+.inpill textarea{flex:1;background:none;border:0;outline:0;color:var(--text);font:inherit;resize:none;max-height:140px;padding:10px 0}
+.inpill textarea::placeholder{color:var(--faint)}
+.cbtn{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;flex:none;font-size:17px}
+.cbtn.send{background:linear-gradient(135deg,var(--violet),#7a9bff);color:#fff}
+.cbtn.send.ready{background:linear-gradient(135deg,var(--violet),var(--indigo));box-shadow:0 0 16px rgba(139,108,255,.5)}
+.cbtn.stop{background:rgba(255,93,108,.25);border-color:rgba(255,93,108,.5)}
+.cbtn.micon.on{background:rgba(255,111,181,.25);border-color:rgba(255,111,181,.5)}
+/* --- Bottom nav --- */
+.bottomnav{display:flex;justify-content:center;padding:2px 40px 10px}
+.navpill{display:flex;gap:4px;padding:6px;border-radius:99px}
+.navpill button{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:99px;color:var(--dim);font-size:14px;font-weight:500}
+.navpill button.active{background:rgba(255,255,255,.2);color:#fff}
+.navpill button.active.sel-chat{background:rgba(255,255,255,.2)}
+.navpill .nico{font-size:18px}
+/* --- History tab --- */
+.histpane{flex:1;overflow-y:auto;padding:8px 16px 16px;display:flex;flex-direction:column;gap:8px}
+.hist-item{text-align:left;border-radius:16px;padding:12px 14px;width:100%}
+.hist-item .hd{color:var(--dim);font-size:11px}
+.hist-item .hp{color:var(--text);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;margin-top:2px}
+.hist-item.active{border-color:var(--violet)}
+.hist-empty{color:var(--faint);font-size:13px;text-align:center;padding:30px}
+/* --- Settings tab --- */
+.setpane{flex:1;overflow-y:auto;padding:8px 16px 16px;display:flex;flex-direction:column;gap:14px}
+.setcard{border-radius:20px;padding:16px}
+.setcard h3{font-size:13px;font-weight:600;color:var(--dim);margin-bottom:10px}
+.toggle{display:flex;align-items:center;justify-content:space-between;font-size:14px;padding:8px 0}
+.sw{appearance:none;width:44px;height:26px;border-radius:99px;background:rgba(255,255,255,.12);position:relative;cursor:pointer;transition:background .2s;flex:none}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .2s}
+.sw:checked{background:var(--violet)}.sw:checked::after{transform:translateX(18px)}
+.mem{display:flex;flex-direction:column;gap:6px;max-height:30vh;overflow:auto}
+.mem div{display:flex;gap:8px;justify-content:space-between;font-size:13px;padding:8px 10px;border-radius:12px;background:rgba(255,255,255,.06)}
+.mem button{color:var(--dim);font-size:16px;line-height:1}.mem button:hover{color:var(--red)}
+.mrow{display:flex;gap:8px;margin-top:8px}
+.mrow input{flex:1;min-width:0;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:9px 12px;color:var(--text);font:inherit;font-size:13px}
+.tools{display:flex;flex-wrap:wrap;gap:6px}.tools span{font:12px var(--mono);padding:4px 9px;border-radius:9px;background:rgba(255,255,255,.07);color:var(--dim)}
+.conns{display:flex;flex-direction:column;gap:6px}
+.conn{display:flex;gap:10px;align-items:flex-start;font-size:13px;padding:8px 10px;border-radius:12px;background:rgba(255,255,255,.06)}
+.conn .cdot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.2);flex:none;margin-top:5px}
+.conn.on .cdot{background:var(--mint);box-shadow:0 0 10px var(--mint)}
+.conn small{display:block;color:var(--dim);font-size:11px;font-family:var(--mono);margin-top:2px}
+.empty-note{color:var(--faint);font-size:13px}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div class="aurora"><i></i><i></i><i></i><i></i></div>
+<div class="vignette"></div>
+<div class="app">
+  <header class="topbar">
+    <h1 id="tabtitle">VIKI</h1>
+    <button class="pill glass" id="statuspill"><span class="sdot"></span><span id="statuslabel">Server</span></button>
+    <button class="iconbtn glass" id="new" title="New chat" aria-label="New chat">+</button>
+  </header>
+  <main>
+    <!-- CHAT -->
+    <section class="tabpane" id="tab-chat">
+      <div id="feed"></div>
+      <div class="inputbar">
+        <button class="hfbtn glass" id="handsfree" title="Conversation mode" aria-label="Conversation mode">≋</button>
+        <div class="inpill glass">
+          <textarea id="input" rows="1" placeholder="Message VIKI" aria-label="Message"></textarea>
+          <button class="cbtn glass micon" id="mic" title="Dictate" aria-label="Dictate">🎙</button>
+          <button class="cbtn glass send" id="send" title="Send" aria-label="Send">↑</button>
+          <button class="cbtn glass stop" id="stop" style="display:none" title="Stop" aria-label="Stop">■</button>
+        </div>
+      </div>
+    </section>
+    <!-- HISTORY -->
+    <section class="tabpane" id="tab-history" hidden>
+      <div class="histpane" id="hist"><div class="hist-empty">No past chats yet</div></div>
+    </section>
+    <!-- SETTINGS -->
+    <section class="tabpane" id="tab-settings" hidden>
+      <div class="setpane">
+        <div class="setcard glass"><h3>Settings</h3>
+          <label class="toggle">Show reasoning<input type="checkbox" class="sw" id="think"></label>
+          <label class="toggle">Read replies aloud<input type="checkbox" class="sw" id="speak"></label>
+          <button class="btn" id="logout" style="width:100%;margin-top:10px;border:1px solid rgba(255,255,255,.16);border-radius:14px;padding:10px">Sign out</button>
+        </div>
+        <div class="setcard glass"><h3>What I remember</h3><div class="mem" id="mem"></div>
+          <form class="mrow" id="memform"><input type="text" id="memin" placeholder="Add a fact" autocomplete="off"><button class="btn primary" style="padding:9px 14px">Add</button></form>
+        </div>
+        <div class="setcard glass"><h3>Tools</h3><div class="tools" id="tools"></div></div>
+        <div class="setcard glass"><h3>Connectors</h3><div class="conns" id="conns"></div></div>
+      </div>
+    </section>
+  </main>
+  <nav class="bottomnav"><div class="navpill glass">
+    <button data-tab="chat" class="active"><span class="nico">✦</span><span class="nlabel">Chat</span></button>
+    <button data-tab="history"><span class="nico">◷</span><span class="nlabel" style="display:none">History</span></button>
+    <button data-tab="settings"><span class="nico">⚙</span><span class="nlabel" style="display:none">Settings</span></button>
+  </div></nav>
+</div>
+<script>
+const $=s=>document.querySelector(s), sid=(crypto.randomUUID?crypto.randomUUID():String(Date.now()));
+let session=sid, busy=false;
+const feed=$('#feed'), input=$('#input');
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SUGG=["Turn on the lamp","What's the weather today?","What devices can you see?","What's on my calendar?"];
+/* --- Tabs --- */
+document.querySelectorAll('.navpill button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.navpill button').forEach(x=>{x.classList.remove('active');x.querySelector('.nlabel').style.display='none'});
+  b.classList.add('active'); b.querySelector('.nlabel').style.display='';
+  document.querySelectorAll('.tabpane').forEach(p=>p.hidden=true);
+  $('#tab-'+b.dataset.tab).hidden=false;
+  $('#tabtitle').textContent = b.dataset.tab==='chat' ? 'VIKI' : b.dataset.tab==='history' ? 'History' : 'Settings';
+  if(b.dataset.tab==='history') loadHistory();
+});
+function md(t){
+  let s=esc(t).replace(/```(\w*)\n?([\s\S]*?)```/g,(_,l,c)=>`<pre><code>${c}</code></pre>`);
+  s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>')
+     .replace(/(https?:\/\/[^\s<)]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
+  return s.split(/\n{2,}/).map(p=>/^\s*[-*] /.test(p)?'<ul>'+p.split('\n').map(l=>'<li>'+l.replace(/^\s*[-*] /,'')+'</li>').join('')+'</ul>':p.startsWith('<pre')?p:'<p>'+p.replace(/\n/g,'<br>')+'</p>').join('');
+}
+function hero(){
+  feed.innerHTML=`<div class="empty"><div class="orb"><div class="glow"></div><div class="disc"></div><div class="sheen"></div><div class="rim"></div></div><h2>Hi, I'm VIKI</h2><p>Ask anything, or tell me what to do.</p></div><div class="chips">${SUGG.map(s=>`<button class="chip glass">${esc(s)}</button>`).join('')}</div>`;
+  feed.querySelectorAll('.chips .chip').forEach(b=>b.onclick=()=>send(b.textContent));
+}
+function add(cls,html){const d=document.createElement('div');d.className='msg '+cls;
+ const t=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+ if(cls==='user'){d.innerHTML=`<div class="bubble">${html}</div><span class="ts">${t}</span>`}
+ else{d.innerHTML=`<div class="bubble glass">${html}</div><span class="ts">${t}</span>`}
+ feed.append(d);feed.scrollTop=feed.scrollHeight;return d}
+function setBusy(b,t){busy=b;document.body.classList.toggle('thinking',b);
+  $('#stop').style.display=b?'grid':'none';$('#send').style.display=b?'none':'grid';
+  $('#statuslabel').textContent=t||(b?'Working':'Server');
+  $('#statuspill').classList.toggle('off',!!b)}
+let edgeAudio=null;
+async function speakEdge(text){
+  try{
+    if(edgeAudio){edgeAudio.pause();edgeAudio=null}
+    const r=await fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+    if(!r.ok) throw new Error('tts '+r.status);
+    const url=URL.createObjectURL(await r.blob());
+    edgeAudio=new Audio(url);
+    edgeAudio.onended=edgeAudio.onerror=()=>{URL.revokeObjectURL(url);edgeAudio=null};
+    edgeAudio.play();
+  }catch(e){}
+}
+async function send(text){
+  text=(text||input.value).trim(); if(!text||busy) return;
+  if(feed.querySelector('.empty')) feed.innerHTML='';
+  input.value=''; input.style.height='auto';
+  add('user',esc(text));
+  const turn=add('agent',''); let bubble=null, raw='', thinkEl=null, planEl=null; const tools={};
+  const ensureBubble=()=>{if(!bubble){bubble=document.createElement('div');bubble.className='bubble glass cursor';turn.insertBefore(bubble,turn.querySelector('.ts'))}};
+  setBusy(true);
+  try{
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,message:text,think:$('#think').checked})});
+    const rd=r.body.getReader(), dec=new TextDecoder(); let buf='';
+    while(true){
+      const {value,done}=await rd.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true}); const parts=buf.split('\n\n'); buf=parts.pop();
+      for(const p of parts){ if(!p.startsWith('data: ')) continue; const {kind,data}=JSON.parse(p.slice(6));
+        if(kind==='status') $('#statuslabel').textContent=data;
+        else if(kind==='thinking'){ if(!thinkEl){thinkEl=document.createElement('div');thinkEl.className='think';turn.insertBefore(thinkEl,turn.firstChild)} thinkEl.textContent+=data; thinkEl.scrollTop=1e6 }
+        else if(kind==='token'){ ensureBubble(); raw+=data; bubble.innerHTML=md(raw) }
+        else if(kind==='reset_answer'){ raw=''; if(bubble){bubble.remove();bubble=null} thinkEl=null }
+        else if(kind==='plan'){ if(!planEl){planEl=document.createElement('div');planEl.className='plan glass';turn.insertBefore(planEl,turn.firstChild)}
+          planEl.innerHTML='<h4>Plan</h4><ul>'+data.map(s=>`<li class="${esc((s.status||'pending').toLowerCase())}"><i></i><span>${esc(s.text||'')}</span></li>`).join('')+'</ul>' }
+        else if(kind==='tool_start'){ if(data.name==='update_plan') continue; const d=document.createElement('details');d.className='tool glass';
+          d.innerHTML=`<summary><span class="spin"></span><span class="tn">${esc(data.name)}</span><span class="ta">${esc(Object.values(data.args).join(' · ').slice(0,90))}</span></summary><pre>${esc(JSON.stringify(data.args,null,2))}</pre>`;
+          tools[data.id]=d; turn.append(d); $('#statuslabel').textContent='Using '+data.name }
+        else if(kind==='tool_result'){ const d=tools[data.id]; if(d){d.classList.add('ok');d.querySelector('pre').textContent+='\n\n→ '+data.result} }
+        else if(kind==='approval'){ const a=document.createElement('div');a.className='approve glass';
+          a.innerHTML=`<p><b>${esc(data.name)}</b> wants to run:</p><code>${esc(JSON.stringify(data.args,null,2))}</code><div class="row"><button class="btn primary" data-ok="1">Allow</button><button class="btn" data-ok="0">Deny</button></div>`;
+          a.querySelectorAll('button').forEach(b=>b.onclick=()=>{fetch('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:data.id,ok:b.dataset.ok==='1'})});a.remove()});
+          turn.append(a); $('#statuslabel').textContent='Waiting for approval' }
+        else if(kind==='done'){ ensureBubble(); bubble.classList.remove('cursor');
+          if(data.type==='error'){bubble.classList.add('err');bubble.textContent=data.content} else {bubble.innerHTML=md(data.content||'(no answer)')}
+          if($('#speak').checked&&data.content){speakEdge(data.content)} }
+        feed.scrollTop=feed.scrollHeight;
+      }
+    }
+  }catch(e){ ensureBubble(); bubble.classList.remove('cursor'); bubble.classList.add('err'); bubble.textContent='Connection lost: '+e.message }
+  setBusy(false); loadState();
+}
+const CONNS=[
+ {label:'Google',tools:['gmail_search'],hint:'python -m connectors.google_auth'},
+ {label:'GitHub',tools:['github_search_repos'],hint:'GITHUB_TOKEN in .env'},
+ {label:'Browser',tools:['browser_goto'],hint:'pip install playwright'},
+ {label:'Home Mini',tools:['announce'],hint:'pip install pychromecast'},
+ {label:'Roku',tools:['roku_play_movie'],hint:'Roku integration in Home Assistant'},
+ {label:'Plex',tools:['plex_play'],hint:'PLEX_URL + PLEX_TOKEN in .env'},
+ {label:'Spotify',tools:['spotify_play'],hint:'python -m connectors.spotify_auth'},
+ {label:'Voice loop',tools:[],hint:'python voice_loop.py',manual:true},
+];
+async function loadState(){
+  try{const s=await (await fetch('/api/state')).json();
+    $('#tools').innerHTML=s.tools.map(t=>`<span>${esc(t)}</span>`).join('');
+    $('#conns').innerHTML=CONNS.map(c=>{const on=c.manual?null:c.tools.some(t=>s.tools.includes(t));
+      return `<div class="conn${on?' on':''}"><span class="cdot"></span><div>${esc(c.label)}<small>${esc(on===false||c.manual?c.hint:'connected')}</small></div></div>`}).join('');
+    renderMem(s.memory)}catch{$('#statuslabel').textContent='Offline';$('#statuspill').classList.add('off')}
+}
+function renderMem(m){ $('#mem').innerHTML=m.length?m.map((f,i)=>`<div><span>${esc(f)}</span><button data-i="${i+1}" aria-label="Forget">×</button></div>`).join(''):'<p class="empty-note">Nothing yet. I\'ll pick up preferences as we talk.</p>';
+  $('#mem').querySelectorAll('button').forEach(b=>b.onclick=async()=>renderMem((await (await fetch('/api/memory',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:+b.dataset.i})})).json()).memory)) }
+$('#memform').onsubmit=async e=>{e.preventDefault();const v=$('#memin').value.trim();if(!v)return;$('#memin').value='';
+  renderMem((await (await fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fact:v})})).json()).memory)};
+input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}};
+document.addEventListener('keydown',e=>{if(e.key==='/'&&!/INPUT|TEXTAREA/.test(document.activeElement.tagName)){e.preventDefault();input.focus()}});
+input.oninput=()=>{input.style.height='auto';input.style.height=input.scrollHeight+'px';$('#send').classList.toggle('ready',input.value.trim().length>0)};
+$('#send').onclick=()=>send();
+$('#stop').onclick=()=>fetch('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session})});
+$('#new').onclick=async()=>{await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session})});session=(crypto.randomUUID?crypto.randomUUID():String(Date.now()));hero();loadState();loadHistory()};
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(SR){const rec=new SR();rec.interimResults=false;let on=false;
+  rec.onresult=e=>{input.value=(input.value+' '+e.results[0][0].transcript).trim();input.oninput()};
+  rec.onend=()=>{on=false;$('#mic').classList.remove('on')};
+  $('#mic').onclick=()=>{on?rec.stop():(rec.start(),on=true,$('#mic').classList.add('on'))}} else $('#mic').style.display='none';
+$('#handsfree').onclick=()=>{ $('#handsfree').classList.toggle('active'); };
+$('#logout').onclick=async()=>{ await fetch('/logout',{method:'POST'}); location.href='/login'; };
+// If the session expired, bounce to the login page.
+const _fetch = window.fetch;
+window.fetch = async (...a) => { const r = await _fetch(...a);
+  if (r.status === 401 && !String(a[0]).includes('/login')) { location.href = '/login'; }
+  return r; };
+// --- Chat history ---
+async function loadHistory(){
+  try{
+    const r = await fetch('/api/sessions');
+    if(!r.ok) return;
+    const {sessions} = await r.json();
+    const el = $('#hist');
+    if(!sessions.length){ el.innerHTML = '<div class="hist-empty">No past chats yet</div>'; return; }
+    el.innerHTML = sessions.map(s=>{
+      const d = s.started ? new Date(s.started).toLocaleDateString([], {month:'short',day:'numeric'}) : '';
+      const t = s.started ? new Date(s.started).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+      return `<button class="hist-item glass" data-sid="${esc(s.id)}"><span class="hd">${esc(d)} ${esc(t)} · ${s.message_count} msgs</span><span class="hp">${esc(s.preview||'(no preview)')}</span></button>`;
+    }).join('');
+    el.querySelectorAll('.hist-item').forEach(b=>b.onclick=()=>openSession(b.dataset.sid, b));
+  }catch(e){}
+}
+async function openSession(sid, btn){
+  try{
+    document.querySelectorAll('.hist-item').forEach(b=>b.classList.remove('active'));
+    if(btn) btn.classList.add('active');
+    const r = await fetch('/api/sessions/'+encodeURIComponent(sid));
+    if(!r.ok) throw new Error('load failed');
+    const {session: s} = await r.json();
+    // switch to chat tab and render
+    document.querySelector('[data-tab="chat"]').click();
+    feed.innerHTML = '';
+    (s.messages||[]).forEach(m=>{
+      const cls = m.role === 'user' ? 'user' : 'agent';
+      const d = document.createElement('div');
+      d.className = 'msg '+cls;
+      const t = m.time ? new Date(m.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+      if(cls==='user'){ d.innerHTML = `<div class="bubble">${md(m.content||'')}</div>`+(t?`<span class="ts">${esc(t)}</span>`:''); }
+      else{ d.innerHTML = `<div class="bubble glass">${md(m.content||'')}</div>`+(t?`<span class="ts">${esc(t)}</span>`:''); }
+      feed.append(d);
+    });
+    feed.scrollTop = feed.scrollHeight;
+    session = sid;
+  }catch(e){}
+}
+hero(); loadState(); loadHistory();
+</script>
+</body>
+</html>
