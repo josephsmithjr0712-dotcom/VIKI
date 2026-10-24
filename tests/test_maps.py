@@ -206,5 +206,79 @@ class TestTraffic(unittest.TestCase):
         self.assertIn("VIKI_TOMTOM_KEY", out)
 
 
+class TestMapPayload(unittest.TestCase):
+    def _run_directions(self, mock_get, mock_post):
+        mock_get.side_effect = [
+            _nominatim(40.0, -81.9, "Start Town"),
+            _nominatim(40.5, -81.7, "End Town"),
+            _OSRM,
+        ]
+        mock_post.return_value = _OVERPASS
+        return maps.maps_directions("A", "B")
+
+    def test_route_carries_endpoint_coords(self):
+        with patch.object(maps, "_http_get_json") as mock_get:
+            mock_get.side_effect = [
+                _nominatim(40.0, -81.9, "Start"),
+                _nominatim(40.5, -81.7, "End"),
+                _OSRM,
+            ]
+            (r, err) = maps.route("A", "B")
+        self.assertIsNone(err)
+        self.assertEqual((r["from_lat"], r["from_lon"]), (40.0, -81.9))
+        self.assertEqual((r["to_lat"], r["to_lon"]), (40.5, -81.7))
+
+    def test_payload_geometry_links_and_no_traffic_without_key(self):
+        with patch.dict(os.environ, {"VIKI_TOMTOM_KEY": ""}):
+            with patch.object(maps, "_http_get_json") as mock_get, patch.object(
+                maps, "_http_post"
+            ) as mock_post:
+                self._run_directions(mock_get, mock_post)
+                payload = maps.take_map_payload("A", "B")
+        self.assertIsNotNone(payload)
+        # Leaflet order: [lat, lon].
+        self.assertEqual(payload["geometry"][0], [40.4, -81.9])
+        self.assertEqual(payload["origin"]["lat"], 40.0)
+        self.assertEqual(payload["destination"]["name"], "End Town")
+        self.assertAlmostEqual(payload["distance_m"], 16093.44)
+        self.assertIn("google.com/maps/dir", payload["links"]["google"])
+        self.assertIn("openstreetmap.org/directions", payload["links"]["osm"])
+        self.assertIsNone(payload["traffic"])
+
+    def test_payload_stale_endpoints_return_none(self):
+        with patch.object(maps, "_http_get_json") as mock_get, patch.object(
+            maps, "_http_post"
+        ) as mock_post:
+            self._run_directions(mock_get, mock_post)
+        self.assertIsNone(maps.take_map_payload("A", "Somewhere Else"))
+        self.assertIsNone(maps.take_map_payload("Elsewhere", "B"))
+
+    def test_simplify_keeps_first_last_and_caps_points(self):
+        coords = [(float(-81.0 - i * 0.001), 40.0) for i in range(500)]
+        out = maps._simplify(coords)
+        self.assertLessEqual(len(out), 200)
+        self.assertEqual(out[0], coords[0])
+        self.assertEqual(out[-1], coords[-1])
+
+    def test_traffic_segments_with_key(self):
+        with patch.dict(os.environ, {"VIKI_TOMTOM_KEY": "fake-key"}):
+            with patch.object(
+                maps, "_http_get_json",
+                return_value={"flowSegmentData": {
+                    "currentSpeed": 27, "freeFlowSpeed": 55}},
+            ):
+                segs = maps.traffic_segments([(-81.9, 40.0), (-81.8, 40.1)])
+        self.assertIsNotNone(segs)
+        self.assertAlmostEqual(segs[0]["ratio"], 27 / 55, places=2)
+        self.assertFalse(segs[0]["closed"])
+
+    def test_directions_text_mentions_map_card(self):
+        with patch.object(maps, "_http_get_json") as mock_get, patch.object(
+            maps, "_http_post"
+        ) as mock_post:
+            out = self._run_directions(mock_get, mock_post)
+        self.assertIn("map card", out)
+
+
 if __name__ == "__main__":
     unittest.main()
