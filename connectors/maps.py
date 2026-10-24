@@ -1,4 +1,5 @@
-"""Maps for VIKI (v0.2.25): distances, directions, construction, traffic.
+"""Maps for VIKI (v0.2.27): distances, directions, construction, traffic,
+plus the structured map payload the web UI renders as an in-chat map card.
 
 Key-free by default, built on OpenStreetMap services:
 - Nominatim for geocoding (address/place -> coordinates).
@@ -9,10 +10,16 @@ Live traffic is the one exception: it needs a TomTom API key. If
 VIKI_TOMTOM_KEY is not set, traffic calls degrade gracefully with a
 clear note — traffic is never faked and never crashes the answer.
 
-Every public function returns a plain-language string (the agent-tool
-convention); network failures become a readable error, never an
-exception to the user. All HTTP calls carry timeouts. Tests mock
-_http_get_json / _http_post, so no test hits the real network.
+Every public text function returns a plain-language string (the
+agent-tool convention); network failures become a readable error,
+never an exception to the user. All HTTP calls carry timeouts. Tests
+mock _http_get_json / _http_post, so no test hits the real network.
+
+Map cards: route() caches its result in _LAST_ROUTE. After the agent
+runs a maps tool, it calls take_map_payload(origin, destination) to
+get the structured payload (geometry, endpoints, links, traffic
+segments) for the chat's map card — but only when the cached route
+matches those exact endpoints, so a stale route is never shown.
 """
 
 import json
@@ -21,7 +28,7 @@ import os
 import urllib.parse
 import urllib.request
 
-USER_AGENT = "VIKI/0.2.25"
+USER_AGENT = "VIKI/0.2.27"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
@@ -29,6 +36,14 @@ TOMTOM_URL = "https://api.tomtom.com/traffic/services/4/flowSegmentData/relative
 
 DEFAULT_TIMEOUT = 12
 OVERPASS_TIMEOUT = 30
+# Map-card geometry is downsampled so the SSE payload stays small.
+MAP_MAX_POINTS = 200
+# Traffic is sampled at a few points along the route, not every vertex.
+TRAFFIC_SAMPLE_POINTS = 5
+
+# Last successful route(), keyed by the (origin, destination) strings the
+# agent passed. Read by take_map_payload(); never shown unless it matches.
+_LAST_ROUTE = None
 
 
 def _http_get_json(url, timeout=DEFAULT_TIMEOUT):
@@ -151,14 +166,21 @@ def route(origin, destination):
                 text = f"{text} onto {name}"
             steps.append(f"{text} ({_fmt_miles(dist)})")
     geom = (leg.get("geometry") or {}).get("coordinates") or []
-    return {
+    route_dict = {
         "distance_m": leg.get("distance", 0),
         "duration_s": leg.get("duration", 0),
         "steps": steps,
         "coords": [(float(c[0]), float(c[1])) for c in geom if len(c) >= 2],
         "from_name": sname,
         "to_name": ename,
-    }, None
+        "from_lat": slat,
+        "from_lon": slon,
+        "to_lat": elat,
+        "to_lon": elon,
+    }
+    global _LAST_ROUTE
+    _LAST_ROUTE = {"origin": origin, "destination": destination, "route": route_dict}
+    return route_dict, None
 
 
 # --- construction / roadworks ---------------------------------------------
@@ -216,18 +238,13 @@ def _tomtom_key():
     return os.getenv("VIKI_TOMTOM_KEY", "").strip()
 
 
-def traffic_at(lat, lon):
-    """Traffic at one point via TomTom flow data.
+def _traffic_speeds(lat, lon):
+    """Raw TomTom flow data for one point.
 
-    Returns (summary_string, None) or (None, note_string). When no key is
-    set, returns (None, key-note) — never faked data.
+    Returns (current_mph, freeflow_mph, road_closed) or (None, error_string).
+    Key-gating lives in the callers: this helper assumes a key is set.
     """
     key = _tomtom_key()
-    if not key:
-        return None, (
-            "Live traffic needs a TomTom API key "
-            "(set VIKI_TOMTOM_KEY in .env)."
-        )
     url = (
         f"{TOMTOM_URL}?point={lat},{lon}&unit=MPH"
         f"&key={urllib.parse.quote(key)}"
@@ -242,7 +259,25 @@ def traffic_at(lat, lon):
     cur, free = seg.get("currentSpeed"), seg.get("freeFlowSpeed")
     if cur is None or free is None:
         return None, "Traffic data was incomplete for that point."
-    if seg.get("roadClosure"):
+    return (cur, free, bool(seg.get("roadClosure"))), None
+
+
+def traffic_at(lat, lon):
+    """Traffic at one point via TomTom flow data.
+
+    Returns (summary_string, None) or (None, note_string). When no key is
+    set, returns (None, key-note) — never faked data.
+    """
+    if not _tomtom_key():
+        return None, (
+            "Live traffic needs a TomTom API key "
+            "(set VIKI_TOMTOM_KEY in .env)."
+        )
+    speeds, err = _traffic_speeds(lat, lon)
+    if err:
+        return None, err
+    cur, free, closed = speeds
+    if closed:
         return "Road closed on this segment.", None
     if cur >= free - 2:
         return f"Flowing freely ({cur} mph vs {free} mph free flow).", None
@@ -288,6 +323,78 @@ def traffic_along_route(coords):
     return f"Traffic along the route: {slow} of {len(notes)} checked points slow. " + "; ".join(notes)
 
 
+def traffic_segments(coords):
+    """Per-point traffic speeds along a route, for the map card.
+
+    Returns a list of {lat, lon, ratio, closed} (ratio = current/free
+    flow, 1.0 = free flow) or None when traffic is unavailable (no key,
+    no geometry, or every lookup failed). Never raises, never fakes.
+    """
+    if not _tomtom_key():
+        return None
+    points = _sample_points(coords, TRAFFIC_SAMPLE_POINTS)
+    if not points:
+        return None
+    segments = []
+    for lon, lat in points:
+        speeds, err = _traffic_speeds(lat, lon)
+        if err or not speeds:
+            continue
+        cur, free, closed = speeds
+        ratio = (cur / free) if free else 1.0
+        segments.append({"lat": lat, "lon": lon, "ratio": round(ratio, 2),
+                         "closed": closed})
+    return segments or None
+
+
+# --- map-card payload ------------------------------------------------------
+
+def _simplify(coords, max_points=MAP_MAX_POINTS):
+    """Downsample geometry for the map card, keeping first/last points."""
+    if len(coords) <= max_points:
+        return list(coords)
+    step = (len(coords) - 1) / (max_points - 1)
+    return [coords[int(round(i * step))] for i in range(max_points)]
+
+
+def map_links(origin, destination, from_lat, from_lon, to_lat, to_lon):
+    """Clickable map links for a route (fallback when the card can't render)."""
+    google = (
+        "https://www.google.com/maps/dir/?api=1"
+        f"&origin={urllib.parse.quote(str(origin))}"
+        f"&destination={urllib.parse.quote(str(destination))}"
+    )
+    osm = (
+        "https://www.openstreetmap.org/directions?engine=fossgis_osrm_car"
+        f"&route={from_lat},{from_lon}%3B{to_lat},{to_lon}"
+    )
+    return {"google": google, "osm": osm}
+
+
+def take_map_payload(origin, destination):
+    """Structured map payload for the most recent route() call.
+
+    Returns None unless the cached route matches these exact endpoints,
+    so the chat never shows a stale route. Geometry is [lat, lon] pairs
+    (Leaflet order), downsampled. Traffic is None without a TomTom key.
+    """
+    cached = _LAST_ROUTE
+    if not cached or cached.get("origin") != origin or cached.get("destination") != destination:
+        return None
+    r = cached["route"]
+    geom = _simplify(r["coords"])
+    return {
+        "origin": {"lat": r["from_lat"], "lon": r["from_lon"], "name": r["from_name"]},
+        "destination": {"lat": r["to_lat"], "lon": r["to_lon"], "name": r["to_name"]},
+        "geometry": [[lat, lon] for lon, lat in geom],
+        "distance_m": r["distance_m"],
+        "duration_s": r["duration_s"],
+        "links": map_links(origin, destination,
+                           r["from_lat"], r["from_lon"], r["to_lat"], r["to_lon"]),
+        "traffic": traffic_segments(r["coords"]),
+    }
+
+
 # --- agent tools (plain-language strings) ----------------------------------
 
 def maps_distance(origin, destination):
@@ -322,6 +429,7 @@ def maps_directions(origin, destination):
         lines.extend(f"- {w}" for w in works)
     else:
         lines.append("No construction reported on this route.")
+    lines.append("The route is also shown on the map card in this chat.")
     return "\n".join(lines)
 
 
