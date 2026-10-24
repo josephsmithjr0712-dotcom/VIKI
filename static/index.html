@@ -95,6 +95,20 @@ details.tool summary::-webkit-details-marker{display:none}
 details.tool.ok .spin{animation:none;border:0;background:var(--mint);border-radius:50%;width:8px;height:8px}
 @keyframes rot{to{transform:rotate(360deg)}}
 details.tool pre{font:12px/1.5 var(--mono);color:var(--dim);padding:0 13px 12px;white-space:pre-wrap;max-height:220px;overflow:auto}
+/* --- Map card (Apple-Maps-style route view) --- */
+.mapcard{border-radius:20px;padding:12px 12px 14px}
+.mapcard .mhead{display:flex;flex-direction:column;gap:2px;padding:2px 4px 10px}
+.mapcard .mroute{font-size:14px;font-weight:600;line-height:1.4}
+.mapcard .mroute .marr{color:var(--dim);font-weight:500}
+.mapcard .meta{font-size:12.5px;color:var(--dim)}
+.mapcard .meta b{color:var(--text);font-weight:600}
+.mapview{height:270px;border-radius:14px;overflow:hidden;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12)}
+.mapview .mloading{display:grid;place-items:center;height:100%;color:var(--dim);font-size:13px}
+.mapfoot{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.mapfoot a{font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:99px;background:rgba(255,255,255,.1);color:var(--text);text-decoration:none}
+.mapfoot a:hover{background:rgba(255,255,255,.2)}
+.mapcard .mtraffic{font-size:12px;color:var(--dim);padding:8px 4px 0}
+.mapcard .mtraffic .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:0}
 .approve{border-radius:18px;padding:14px 16px}
 .approve p{font-size:14px;margin-bottom:10px}.approve code{font:12px var(--mono);color:var(--amber);display:block;white-space:pre-wrap;margin:6px 0 12px;max-height:140px;overflow:auto}
 .approve .row{display:flex;gap:10px}
@@ -235,6 +249,69 @@ function hero(){
   feed.innerHTML=`<div class="empty"><div class="orb"><div class="glow"></div><div class="disc"></div><div class="sheen"></div><div class="rim"></div></div><h2>Hi, I'm VIKI</h2><p>Ask anything, or tell me what to do.</p></div><div class="chips">${SUGG.map(s=>`<button class="chip glass">${esc(s)}</button>`).join('')}</div>`;
   feed.querySelectorAll('.chips .chip').forEach(b=>b.onclick=()=>send(b.textContent));
 }
+/* --- Map cards: Leaflet, lazy-loaded; links as offline fallback --- */
+const LEAFLET_CSS='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+const LEAFLET_JS='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+let leafletReady=null;
+function ensureLeaflet(){
+  if(window.L) return Promise.resolve(true);
+  if(leafletReady) return leafletReady;
+  leafletReady=new Promise(res=>{
+    const link=document.createElement('link'); link.rel='stylesheet'; link.href=LEAFLET_CSS; document.head.appendChild(link);
+    const s=document.createElement('script'); s.src=LEAFLET_JS;
+    const to=setTimeout(()=>res(false),8000);
+    s.onload=()=>{clearTimeout(to);res(!!window.L)};
+    s.onerror=()=>{clearTimeout(to);res(false)};
+    document.head.appendChild(s);
+  });
+  return leafletReady;
+}
+const _num=v=>{const n=Number(v);return Number.isFinite(n)?n:null};
+const _trafficColor=t=>!t?'#8B6CFF':t.closed?'#3a3f4a':t.ratio>=0.85?'#46F2B0':t.ratio>=0.6?'#FFC857':'#FF5D6C';
+function _trafficLabel(m){
+  if(!m.traffic||!m.traffic.length) return '';
+  const slow=m.traffic.filter(t=>t.closed||t.ratio<0.85).length;
+  if(!slow) return '<div class="mtraffic"><span class="dot" style="background:#46F2B0"></span>Traffic flowing freely</div>';
+  return '<div class="mtraffic"><span class="dot" style="background:#FFC857"></span>'+slow+' slow spot'+(slow>1?'s':'')+' on this route</div>';
+}
+function renderMapCard(turn,m){
+  const card=document.createElement('div'); card.className='mapcard glass';
+  const o=m.origin||{}, d=m.destination||{};
+  const miles=(Number(m.distance_m)||0)/1609.344;
+  const mins=Math.round((Number(m.duration_s)||0)/60);
+  const eta=mins<60?mins+' min':Math.floor(mins/60)+' hr '+(mins%60)+' min';
+  const glink=(m.links&&m.links.google)||'', olink=(m.links&&m.links.osm)||'';
+  card.innerHTML='<div class="mhead"><div class="mroute">'+esc(o.name||'Start')+' <span class="marr">→</span> '+esc(d.name||'Destination')+'</div>'
+    +'<div class="meta"><b>'+esc(miles.toFixed(1))+' miles</b> · <b>'+esc(eta)+'</b></div></div>'
+    +'<div class="mapview"><div class="mloading">Loading map…</div></div>'
+    +_trafficLabel(m)
+    +'<div class="mapfoot">'+(glink?'<a href="'+esc(glink)+'" target="_blank" rel="noopener">Open in Google Maps</a>':'')
+    +(olink?'<a href="'+esc(olink)+'" target="_blank" rel="noopener">Open in OpenStreetMap</a>':'')+'</div>';
+  turn.append(card); feed.scrollTop=feed.scrollHeight;
+  const view=card.querySelector('.mapview');
+  ensureLeaflet().then(ok=>{
+    if(!ok){ view.innerHTML='<div class="mloading">Map preview unavailable offline — use the links below.</div>'; return; }
+    const geom=(m.geometry||[]).map(p=>[_num(p[0]),_num(p[1])]).filter(p=>p[0]!=null&&p[1]!=null);
+    const oLat=_num(o.lat), oLon=_num(o.lon), dLat=_num(d.lat), dLon=_num(d.lon);
+    if(!geom.length||oLat==null||dLat==null){ view.innerHTML='<div class="mloading">No route geometry to draw.</div>'; return; }
+    view.innerHTML='';
+    const map=L.map(view,{scrollWheelZoom:false}).fitBounds(geom.length>1?geom:[[oLat,oLon],[dLat,dLon]],{padding:[28,28]});
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',{
+      attribution:'© OpenStreetMap contributors © CARTO', maxZoom:20}).addTo(map);
+    const segs=(m.traffic&&m.traffic.length)?m.traffic:[];
+    if(segs.length){
+      for(let i=0;i<geom.length-1;i++){
+        const t=segs[Math.round(i/(geom.length-1)*(segs.length-1))];
+        L.polyline([geom[i],geom[i+1]],{color:_trafficColor(t),weight:5,opacity:0.9}).addTo(map);
+      }
+    } else {
+      L.polyline(geom,{color:'#8B6CFF',weight:5,opacity:0.9}).addTo(map);
+    }
+    L.circleMarker([oLat,oLon],{radius:8,color:'#fff',weight:2,fillColor:'#46F2B0',fillOpacity:1}).addTo(map).bindPopup(esc(o.name||'Start'));
+    L.circleMarker([dLat,dLon],{radius:8,color:'#fff',weight:2,fillColor:'#FF6FB5',fillOpacity:1}).addTo(map).bindPopup(esc(d.name||'Destination'));
+    requestAnimationFrame(()=>map.invalidateSize());
+  });
+}
 function add(cls,html){const d=document.createElement('div');d.className='msg '+cls;
  const t=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
  if(cls==='user'){d.innerHTML=`<div class="bubble">${html}</div><span class="ts">${t}</span>`}
@@ -313,6 +390,7 @@ async function send(text){
           d.innerHTML=`<summary><span class="spin"></span><span class="tn">${esc(data.name)}</span><span class="ta">${esc(Object.values(data.args).join(' · ').slice(0,90))}</span></summary><pre>${esc(JSON.stringify(data.args,null,2))}</pre>`;
           tools[data.id]=d; turn.append(d); $('#statuslabel').textContent='Using '+data.name }
         else if(kind==='tool_result'){ const d=tools[data.id]; if(d){d.classList.add('ok');d.querySelector('pre').textContent+='\n\n→ '+data.result} }
+        else if(kind==='map'){ renderMapCard(turn, data) }
         else if(kind==='approval'){ const a=document.createElement('div');a.className='approve glass';
           a.innerHTML=`<p><b>${esc(data.name)}</b> wants to run:</p><code>${esc(JSON.stringify(data.args,null,2))}</code><div class="row"><button class="btn primary" data-ok="1">Allow</button><button class="btn" data-ok="0">Deny</button></div>`;
           a.querySelectorAll('button').forEach(b=>b.onclick=()=>{fetch('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:data.id,ok:b.dataset.ok==='1'})});a.remove()});
