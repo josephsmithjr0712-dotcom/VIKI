@@ -29,6 +29,7 @@ from connectors.browser import (
     browser_text,
 )
 from connectors.home_mini import announce as home_announce, list_devices as cast_list_devices
+from connectors.maps import maps_directions, maps_distance, maps_traffic
 from connectors.roku import (
     ha_connected,
     roku_apps,
@@ -297,6 +298,9 @@ SPECS = {
     "web_search": _spec("web_search", "Search the web for current information, news, or facts you don't know.", {"query": S("search query")}, ["query"]),
     "read_webpage": _spec("read_webpage", "Open a URL and return its readable text. Use after web_search to read a promising result.", {"url": S("full URL")}, ["url"]),
     "get_weather": _spec("get_weather", "Current weather and 3-day outlook for a place.", {"location": S("city, e.g. Paris"), "unit": S("Fahrenheit or Celsius")}, ["location"]),
+    "maps_distance": _spec("maps_distance", "Driving distance and time between two places (OpenStreetMap, no key needed).", {"origin": S("starting place/address"), "destination": S("destination place/address")}, ["origin", "destination"]),
+    "maps_directions": _spec("maps_directions", "Turn-by-turn driving directions between two places, plus construction/roadworks on the route (OpenStreetMap, no key needed).", {"origin": S("starting place/address"), "destination": S("destination place/address")}, ["origin", "destination"]),
+    "maps_traffic": _spec("maps_traffic", "Live traffic along the driving route between two places. Needs a TomTom key (VIKI_TOMTOM_KEY); without one it says so plainly instead of guessing.", {"origin": S("starting place/address"), "destination": S("destination place/address")}, ["origin", "destination"]),
     "calculate": _spec("calculate", "Evaluate a math expression exactly. Always use this for arithmetic.", {"expression": S("e.g. 18.5*12 + sqrt(49)")}, ["expression"]),
     "current_time": _spec("current_time", "Get the current local date and time."),
     "remember": _spec("remember", "Save a durable fact about the user (preference, project, name) for future sessions. Never save secrets.", {"fact": S("one short sentence")}, ["fact"]),
@@ -430,6 +434,8 @@ class Toolbox:
     def __init__(self, store):
         self.store = store
         self.funcs = {"web_search": web_search, "read_webpage": read_webpage, "get_weather": get_weather,
+                      "maps_distance": maps_distance, "maps_directions": maps_directions,
+                      "maps_traffic": maps_traffic,
                       "calculate": calculate, "current_time": current_time, "list_files": list_files,
                       "read_file": read_file, "write_file": write_file, "home_assistant": home_assistant,
                       "gmail_search": gmail_search, "gmail_read": gmail_read, "gmail_send": gmail_send,
