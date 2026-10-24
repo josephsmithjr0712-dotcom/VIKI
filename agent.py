@@ -1,8 +1,18 @@
 """VIKI agent core: a plan -> act -> observe loop on top of Ollama tool calling."""
 import json, os, secrets, time
 from pathlib import Path
-import ollama
-from dotenv import load_dotenv
+try:
+    import ollama
+except ImportError:
+    # Graceful degradation: agent.py must stay importable where the model
+    # client isn't installed (CI sandboxes, minimal installs). VIKI raises
+    # a clear error at construction time if a model call is actually needed.
+    ollama = None
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*_args, **_kwargs):  # no .env support; os.environ still works
+        return False
 
 
 def _load_personality():
@@ -66,6 +76,11 @@ class VIKI:
     def __init__(self, toolbox):
         load_dotenv()
         self.model = os.getenv("VIKI_MODEL", "llama3.2:latest")
+        if ollama is None:
+            raise RuntimeError(
+                "The 'ollama' package is not installed, so VIKI cannot talk to a model. "
+                "Install it with: pip install ollama"
+            )
         self.client = ollama.Client(host=os.getenv("VIKI_ADDRESS", "http://localhost:11434"))
         self.max_steps = int(os.getenv("VIKI_MAX_STEPS", "10"))
         try:
