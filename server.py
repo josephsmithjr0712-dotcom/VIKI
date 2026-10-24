@@ -165,7 +165,7 @@ def session_load(sid):
 
 @app.post("/api/chat")
 def chat():
-    body = request.get_json(force=True)
+    body = request.get_json(force=True, silent=True) or {}
     sid = body.get("session", "default")
     prompt = (body.get("message") or "").strip()
     think = bool(body.get("think"))
@@ -252,7 +252,7 @@ def upload():
 
 @app.post("/api/approve")
 def approve_route():
-    b = request.get_json(force=True)
+    b = request.get_json(force=True, silent=True) or {}
     a = approvals.get(b.get("id"))
     if a:
         a["ok"] = bool(b.get("ok")); a["event"].set()
@@ -261,14 +261,14 @@ def approve_route():
 
 @app.post("/api/stop")
 def stop():
-    c = cancels.get(request.get_json(force=True).get("session", "default"))
+    c = cancels.get((request.get_json(force=True, silent=True) or {}).get("session", "default"))
     if c: c.set()
     return jsonify(ok=True)
 
 
 @app.post("/api/reset")
 def reset():
-    sid = request.get_json(force=True).get("session", "default")
+    sid = (request.get_json(force=True, silent=True) or {}).get("session", "default")
     if sid in sessions:
         try: checkpoint(sessions.pop(sid))
         except Exception: sessions.pop(sid, None)
