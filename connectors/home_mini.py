@@ -12,6 +12,11 @@ must be visible in Home Assistant as a media_player (Google Cast
 integration). Override the entity with MINI_ENTITY in .env.
 
 Falls back to direct Cast discovery (pychromecast) if HA is unreachable.
+
+No-repeat guard: announce() dedupes through announcements.AnnouncementLog
+by default, so the same message is never spoken twice — a failed attempt
+is NOT recorded, so it can be retried. Pass dedupe=False to repeat a
+message on purpose.
 """
 import json
 import os
@@ -23,6 +28,13 @@ from datetime import datetime
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+try:
+    # announcements.py lives at the repo root; if home_mini is imported
+    # without it on sys.path, dedupe just degrades to off (never a crash).
+    from announcements import AnnouncementLog
+except Exception:  # pragma: no cover - import-path fallback
+    AnnouncementLog = None
 
 HERE = Path(__file__).resolve().parent
 ANNOUNCE_DIR = HERE.parent / "workspace" / "announcements"
@@ -228,24 +240,45 @@ def _announce_cast(text: str, device: str | None, timeout: float = 30) -> str:
 # --- Public API ------------------------------------------------------------
 
 def announce(text: str, device: str | None = None, timeout: float = 30,
-           wait: bool = True) -> str:
+           wait: bool = True, dedupe: bool = True, log=None) -> str:
     """Speak text out loud on the Google Home Mini. Returns a status string.
 
     Tries Home Assistant first (reliable, on your LAN), falls back to
 direct Cast discovery if HA is unreachable.
     wait=True (default) blocks until the Mini finishes speaking — the
 voice loop uses this so the mic stays paused during announcements.
+    dedupe=True (default) skips a message already spoken (checked via
+AnnouncementLog; pass an explicit log in tests, or dedupe=False to
+repeat a message on purpose). Only a successful announcement is
+recorded — a failed attempt is never marked, so it can be retried.
     """
     text = (text or "").strip()
     if not text:
         return "Nothing to announce."
     if len(text) > 500:
         return "Announcement too long (500 char max) — keep it short."
+    log_obj = None
+    if dedupe:
+        if log is not None:
+            log_obj = log
+        elif AnnouncementLog is not None:
+            try:
+                log_obj = AnnouncementLog()
+            except Exception:
+                log_obj = None
+        if log_obj is not None and log_obj.already_announced(text):
+            return "Already announced — skipped (no-repeat guard)."
     try:
-        return _announce_ha(text, device, wait=wait)
+        result = _announce_ha(text, device, wait=wait)
     except Exception as e:
         ha_err = f"{type(e).__name__}: {e}"
-    try:
-        return _announce_cast(text, device, timeout)
-    except Exception as e:
-        return f"HA failed ({ha_err}); Cast fallback also failed ({type(e).__name__}: {e})"
+        try:
+            result = _announce_cast(text, device, timeout)
+        except Exception as e2:
+            return f"HA failed ({ha_err}); Cast fallback also failed ({type(e2).__name__}: {e2})"
+    if log_obj is not None and result.startswith("Announced on"):
+        try:
+            log_obj.mark_announced(text)
+        except Exception:
+            pass
+    return result
