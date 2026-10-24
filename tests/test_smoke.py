@@ -165,6 +165,41 @@ class TestAgentLoop(unittest.TestCase):
         self.assertTrue(plans, "update_plan should emit a plan event")
         self.assertEqual(plans[0], [])
 
+    def test_maps_tool_emits_map_event(self):
+        # v0.2.27: a maps tool call must emit a "map" SSE event carrying
+        # the route payload (geometry, endpoints, links) for the chat card.
+        import connectors.maps as maps_mod
+
+        def _nom(lat, lon, name):
+            return [{"lat": str(lat), "lon": str(lon), "display_name": name}]
+
+        _osrm = {"routes": [{"distance": 16093.44, "duration": 1500, "legs": [{
+            "steps": [{"maneuver": {"type": "depart"}, "name": "Main St", "distance": 500},
+                      {"maneuver": {"type": "arrive"}, "name": "", "distance": 0}]}],
+            "geometry": {"coordinates": [[-81.9, 40.4], [-81.8, 40.45], [-81.7, 40.5]]}}]}
+        _overpass = {"elements": []}
+        viki, _ = make_viki([
+            ("chunks", [FakeMsg(tool_calls=[FakeCall("maps_directions", {"origin": "A", "destination": "B"})])]),
+            ("chunks", [FakeMsg(content="here is your route")]),
+        ], self.tmp)
+        with patch.object(maps_mod, "_http_get_json") as mock_get, patch.object(
+            maps_mod, "_http_post", return_value=_overpass
+        ), patch.dict(os.environ, {"VIKI_TOMTOM_KEY": ""}):
+            mock_get.side_effect = [
+                _nom(40.0, -81.9, "Start Town"),
+                _nom(40.5, -81.7, "End Town"),
+                _osrm,
+            ]
+            out, events = run_loop(viki, "directions from A to B")
+        self.assertEqual(out["type"], "text")
+        map_events = [p for k, p in events if k == "map"]
+        self.assertTrue(map_events, "maps tool should emit a map event")
+        payload = map_events[0]
+        self.assertEqual(payload["geometry"][0], [40.4, -81.9])
+        self.assertEqual(payload["origin"]["name"], "Start Town")
+        self.assertIn("google.com/maps/dir", payload["links"]["google"])
+        self.assertIsNone(payload["traffic"])
+
 
 class TestTools(unittest.TestCase):
     def test_calculate(self):
