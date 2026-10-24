@@ -211,6 +211,7 @@ class VIKI:
                     repeats = repeats + 1 if key == last_key else 1
                     last_key = key
                     emit("tool_start", {"id": cid, "name": name, "args": args})
+                    executed = False
                     if repeats >= _MAX_IDENTICAL_CALLS:
                         # Stuck in a loop: hand back the previous result
                         # instead of executing again. This also avoids
@@ -227,9 +228,23 @@ class VIKI:
                     else:
                         if name == "update_plan": emit("plan", args.get("steps") or [])
                         result = self.toolbox.run(name, args)
+                        executed = True
                     if repeats < _MAX_IDENTICAL_CALLS:
                         last_result = result
                     emit("tool_result", {"id": cid, "result": result[:1500]})
+                    # Map card: after a maps tool actually runs, hand the
+                    # frontend the structured route payload (geometry,
+                    # endpoints, links, traffic) so it can render the map
+                    # in-chat. Skipped/denied calls get no card, and a
+                    # stale route (different endpoints) is never shown.
+                    if executed and name in ("maps_directions", "maps_distance", "maps_traffic"):
+                        try:
+                            from connectors.maps import take_map_payload
+                            payload = take_map_payload(args.get("origin"), args.get("destination"))
+                        except Exception:
+                            payload = None
+                        if payload:
+                            emit("map", payload)
                     used.append({"name": name, "arguments": args, "result": result[:500]})
                     messages.append({"role": "tool", "tool_name": name, "content": result})
                     if repeats == 2:
