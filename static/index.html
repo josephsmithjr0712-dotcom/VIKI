@@ -296,8 +296,8 @@ function renderMapCard(turn,m){
     if(!geom.length||oLat==null||dLat==null){ view.innerHTML='<div class="mloading">No route geometry to draw.</div>'; return; }
     view.innerHTML='';
     const map=L.map(view,{scrollWheelZoom:false}).fitBounds(geom.length>1?geom:[[oLat,oLon],[dLat,dLon]],{padding:[28,28]});
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',{
-      attribution:'© OpenStreetMap contributors © CARTO', maxZoom:20}).addTo(map);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      attribution:'© OpenStreetMap contributors', maxZoom:19}).addTo(map);
     const segs=(m.traffic&&m.traffic.length)?m.traffic:[];
     if(segs.length){
       for(let i=0;i<geom.length-1;i++){
