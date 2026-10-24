@@ -3,7 +3,18 @@ import hmac
 import json, os, queue, secrets, threading, time, uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from dotenv import load_dotenv, set_key
+try:
+    from dotenv import load_dotenv, set_key
+except ImportError:
+    # Graceful degradation (v0.2.22): server.py must stay importable where
+    # python-dotenv isn't installed. load_dotenv is a no-op; set_key raising
+    # is already swallowed by _get_or_create, so generated secrets live in
+    # os.environ for the session instead of being persisted to .env.
+    def load_dotenv(*_args, **_kwargs):
+        return False
+
+    def set_key(*_args, **_kwargs):
+        raise RuntimeError("python-dotenv is not installed; cannot persist .env values")
 load_dotenv()
 from flask import Flask, Response, jsonify, request, send_from_directory, session
 
