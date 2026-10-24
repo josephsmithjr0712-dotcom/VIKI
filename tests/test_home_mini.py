@@ -1,7 +1,9 @@
 """Tests for Home Mini announcements via Home Assistant.
 HA API and Edge TTS are mocked; the HTTP file server is exercised for real."""
 import sys
+import tempfile
 import urllib.request
+from functools import partial
 from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
@@ -9,6 +11,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import connectors.home_mini as hm
+from announcements import AnnouncementLog
 
 FAKE_MP3 = b"\xff\xfb\x90\x00" * 100  # fake MP3 frame bytes
 
@@ -22,11 +25,18 @@ FAKE_STATES = [
 
 class TestAnnounceHA(TestCase):
     def setUp(self):
+        # announce() now dedupes via AnnouncementLog by default; point
+        # that log at a fresh temp dir per test so tests stay hermetic
+        # (a spoken message in one test must not skip the next test).
+        self._tmpdir = tempfile.mkdtemp()
         self.patches = [
             patch.object(hm, "_ha_states", return_value=FAKE_STATES),
             patch.object(hm, "_ha_service"),
             patch.object(hm, "_lan_ip", return_value="127.0.0.1"),
             patch("connectors.edge_tts.speak", return_value=FAKE_MP3),
+            patch.object(hm, "AnnouncementLog",
+                         partial(AnnouncementLog,
+                                 path=Path(self._tmpdir) / "announced.json")),
         ]
         self.mock_states = self.patches[0].start()
         self.mock_service = self.patches[1].start()
@@ -112,6 +122,54 @@ class TestAnnounceHA(TestCase):
         self.assertIn("announce", tb.enabled)
         self.assertIn("cast_devices", tb.enabled)
         self.assertFalse(tb.needs_approval("announce", {"text": "hi"}))
+
+
+class TestAnnounceDedupe(TestCase):
+    """The v0.2.26 wiring: announce() itself enforces the no-repeat guard."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.log = AnnouncementLog(path=self.tmpdir / "announced.json")
+        self.patches = [
+            patch.object(hm, "_ha_states", return_value=FAKE_STATES),
+            patch.object(hm, "_ha_service"),
+            patch.object(hm, "_lan_ip", return_value="127.0.0.1"),
+            patch("connectors.edge_tts.speak", return_value=FAKE_MP3),
+        ]
+        self.mock_service = self.patches[1].start()
+        for p in (self.patches[0], self.patches[2], self.patches[3]):
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    def test_repeat_is_skipped(self):
+        out1 = hm.announce("Dinner is ready", log=self.log)
+        self.assertIn("via Home Assistant", out1)
+        out2 = hm.announce("Dinner is ready", log=self.log)
+        self.assertIn("Already announced", out2)
+        self.assertEqual(self.mock_service.call_count, 1)
+
+    def test_rewording_is_skipped(self):
+        hm.announce("Dinner is ready!", log=self.log)
+        out = hm.announce("  dinner IS ready ", log=self.log)
+        self.assertIn("Already announced", out)
+        self.assertEqual(self.mock_service.call_count, 1)
+
+    def test_dedupe_off_repeats(self):
+        hm.announce("Dinner is ready", log=self.log, dedupe=False)
+        out = hm.announce("Dinner is ready", log=self.log, dedupe=False)
+        self.assertIn("via Home Assistant", out)
+        self.assertEqual(self.mock_service.call_count, 2)
+
+    def test_failed_announce_is_not_recorded(self):
+        # No HA speakers, Cast reports failure: nothing is marked, so a
+        # retry actually retries instead of being swallowed by the guard.
+        with patch.object(hm, "_ha_states", return_value=[]), \
+                patch.object(hm, "_announce_cast",
+                             return_value="No Cast devices found.") as mock_cast:
+            hm.announce("Hello?", log=self.log)
+            hm.announce("Hello?", log=self.log)
+            self.assertEqual(mock_cast.call_count, 2)
+        self.assertFalse(self.log.already_announced("Hello?"))
 
 
 if __name__ == "__main__":
