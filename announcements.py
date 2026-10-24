@@ -15,8 +15,10 @@ and safe to call from any announcement path:
   Joey's phone is home AND the lights are on AND it is after 3pm on a
   weekday — and only once per day.
 
-Wiring this into ``connectors/home_mini.py`` / the scheduler is a later
-hour's job; this module deliberately has no side effects on import.
+Wired into ``connectors/home_mini.py`` ``announce()`` since v0.2.26
+(dedupe on by default; only successful announcements are recorded).
+Detecting phone-home + lights-on for the welcome-home trigger itself is
+still a later step; this module deliberately has no side effects on import.
 """
 
 import hashlib
