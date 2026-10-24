@@ -228,6 +228,16 @@ class ServerContractTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.get_json()["ok"])
 
+    def test_malformed_json_body_is_handled(self):
+        """Endpoints must not 500 on a non-JSON body; they return a graceful JSON response."""
+        client, _ = self._login()
+        bad = "{not valid json"
+        for path in ("/api/chat", "/api/approve", "/api/stop", "/api/reset"):
+            r = client.post(path, data=bad, content_type="application/json")
+            self.assertNotEqual(r.status_code, 500)
+            body = r.get_json()
+            self.assertIsNotNone(body, f"{path} should return JSON on malformed input")
+
     # --- sessions ---------------------------------------------------------
     def test_sessions_list(self):
         client, _ = self._login()
