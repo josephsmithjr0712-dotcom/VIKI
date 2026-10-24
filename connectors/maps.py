@@ -1,0 +1,343 @@
+"""Maps for VIKI (v0.2.25): distances, directions, construction, traffic.
+
+Key-free by default, built on OpenStreetMap services:
+- Nominatim for geocoding (address/place -> coordinates).
+- OSRM demo server for routing (distance, duration, turn-by-turn steps).
+- Overpass API for construction/roadworks near the route.
+
+Live traffic is the one exception: it needs a TomTom API key. If
+VIKI_TOMTOM_KEY is not set, traffic calls degrade gracefully with a
+clear note — traffic is never faked and never crashes the answer.
+
+Every public function returns a plain-language string (the agent-tool
+convention); network failures become a readable error, never an
+exception to the user. All HTTP calls carry timeouts. Tests mock
+_http_get_json / _http_post, so no test hits the real network.
+"""
+
+import json
+import math
+import os
+import urllib.parse
+import urllib.request
+
+USER_AGENT = "VIKI/0.2.25"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+TOMTOM_URL = "https://api.tomtom.com/traffic/services/4/flowSegmentData/relative/0/json"
+
+DEFAULT_TIMEOUT = 12
+OVERPASS_TIMEOUT = 30
+
+
+def _http_get_json(url, timeout=DEFAULT_TIMEOUT):
+    """GET a URL and parse the JSON body. Separated out so tests can mock it."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def _http_post(url, data, timeout=OVERPASS_TIMEOUT):
+    """POST form data and parse the JSON body. Separated out for tests."""
+    body = urllib.parse.urlencode({"data": data}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, headers={"User-Agent": USER_AGENT}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def _fmt_miles(meters):
+    return f"{meters / 1609.344:.1f} miles"
+
+
+def _fmt_minutes(seconds):
+    mins = int(round(seconds / 60))
+    if mins < 60:
+        return f"{mins} min"
+    hours, mins = divmod(mins, 60)
+    return f"{hours} hr {mins} min" if mins else f"{hours} hr"
+
+
+# --- geocoding -----------------------------------------------------------
+
+def geocode(place):
+    """Resolve a place/address to (lat, lon, display_name).
+
+    Returns (None, error_string) on failure.
+    """
+    if not place or not str(place).strip():
+        return None, "No place given to look up."
+    query = urllib.parse.urlencode(
+        {"q": str(place).strip(), "format": "json", "limit": 1}
+    )
+    try:
+        rows = _http_get_json(f"{NOMINATIM_URL}?{query}")
+    except Exception as e:
+        return None, f"Could not look up {place!r}: {e}"
+    if not rows:
+        return None, f"No match found for {place!r}."
+    row = rows[0]
+    try:
+        return (
+            float(row["lat"]),
+            float(row["lon"]),
+            row.get("display_name", str(place)),
+        ), None
+    except (KeyError, TypeError, ValueError):
+        return None, f"Got an unexpected result looking up {place!r}."
+
+
+# --- routing -------------------------------------------------------------
+
+def route(origin, destination):
+    """Route between two places.
+
+    Returns (route_dict, None) or (None, error_string). route_dict has
+    distance_m, duration_s, steps (list of instruction strings), and
+    coords (list of (lon, lat) geometry points).
+    """
+    start, err = geocode(origin)
+    if err:
+        return None, err
+    end, err = geocode(destination)
+    if err:
+        return None, err
+    (slat, slon, sname) = start
+    (elat, elon, ename) = end
+    coords = f"{slon},{slat};{elon},{elat}"
+    url = (
+        f"{OSRM_URL}/{coords}?overview=full&geometries=geojson"
+        f"&steps=true&annotations=false"
+    )
+    try:
+        data = _http_get_json(url)
+    except Exception as e:
+        return None, f"Could not plan a route: {e}"
+    routes = data.get("routes") or []
+    if not routes:
+        return None, f"No driving route found from {origin!r} to {destination!r}."
+    leg = routes[0]
+    steps = []
+    for leg_part in leg.get("legs", []):
+        for step in leg_part.get("steps", []):
+            man = step.get("maneuver", {}) or {}
+            mtype = man.get("type", "")
+            mod = man.get("modifier", "")
+            name = step.get("name", "")
+            dist = step.get("distance", 0)
+            if mtype == "arrive":
+                text = "Arrive at your destination"
+            elif mtype == "depart":
+                text = "Head out"
+            elif mtype == "roundabout":
+                text = "Go through the roundabout"
+            elif mtype == "turn":
+                text = f"Turn {mod}" if mod else "Turn"
+            elif mtype == "merge":
+                text = "Merge"
+            elif mtype == "on ramp":
+                text = "Take the ramp"
+            elif mtype == "off ramp":
+                text = "Take the exit"
+            elif mtype == "fork":
+                text = f"Keep {mod}" if mod else "Keep"
+            elif mtype == "end of road":
+                text = f"At the end of the road, turn {mod}" if mod else "At the end of the road"
+            else:
+                text = "Continue"
+            if name and mtype != "arrive":
+                text = f"{text} onto {name}"
+            steps.append(f"{text} ({_fmt_miles(dist)})")
+    geom = (leg.get("geometry") or {}).get("coordinates") or []
+    return {
+        "distance_m": leg.get("distance", 0),
+        "duration_s": leg.get("duration", 0),
+        "steps": steps,
+        "coords": [(float(c[0]), float(c[1])) for c in geom if len(c) >= 2],
+        "from_name": sname,
+        "to_name": ename,
+    }, None
+
+
+# --- construction / roadworks ---------------------------------------------
+
+def _bbox(coords, pad_deg=0.01):
+    lons = [c[0] for c in coords]
+    lats = [c[1] for c in coords]
+    return (
+        min(lats) - pad_deg,
+        min(lons) - pad_deg,
+        max(lats) + pad_deg,
+        max(lons) + pad_deg,
+    )
+
+
+def construction_along_route(coords):
+    """Find OSM construction/roadworks near a route.
+
+    Returns a list of short descriptions (possibly empty), or an error
+    string on failure. Never raises.
+    """
+    if not coords:
+        return []
+    south, west, north, east = _bbox(coords)
+    query = (
+        "[out:json][timeout:25];"
+        "("
+        f'way["highway"="construction"]({south},{west},{north},{east});'
+        f'way["construction"]({south},{west},{north},{east});'
+        ");"
+        "out tags center 50;"
+    )
+    try:
+        data = _http_post(OVERPASS_URL, query)
+    except Exception as e:
+        return f"Construction check failed: {e}"
+    found = []
+    for el in data.get("elements", [])[:50]:
+        tags = el.get("tags", {}) or {}
+        name = tags.get("name") or tags.get("ref") or "unnamed road"
+        kind = tags.get("construction") or "roadwork"
+        found.append(f"{name} ({kind})")
+    # Dedupe, keep order.
+    seen, out = set(), []
+    for item in found:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+# --- live traffic (TomTom, key-gated) --------------------------------------
+
+def _tomtom_key():
+    return os.getenv("VIKI_TOMTOM_KEY", "").strip()
+
+
+def traffic_at(lat, lon):
+    """Traffic at one point via TomTom flow data.
+
+    Returns (summary_string, None) or (None, note_string). When no key is
+    set, returns (None, key-note) — never faked data.
+    """
+    key = _tomtom_key()
+    if not key:
+        return None, (
+            "Live traffic needs a TomTom API key "
+            "(set VIKI_TOMTOM_KEY in .env)."
+        )
+    url = (
+        f"{TOMTOM_URL}?point={lat},{lon}&unit=MPH"
+        f"&key={urllib.parse.quote(key)}"
+    )
+    try:
+        data = _http_get_json(url)
+    except Exception as e:
+        return None, f"Traffic lookup failed: {e}"
+    seg = data.get("flowSegmentData") or {}
+    if not seg:
+        return None, "No traffic data for that point."
+    cur, free = seg.get("currentSpeed"), seg.get("freeFlowSpeed")
+    if cur is None or free is None:
+        return None, "Traffic data was incomplete for that point."
+    if seg.get("roadClosure"):
+        return "Road closed on this segment.", None
+    if cur >= free - 2:
+        return f"Flowing freely ({cur} mph vs {free} mph free flow).", None
+    return f"Slow traffic ({cur} mph vs {free} mph free flow).", None
+
+
+def _sample_points(coords, max_points=5):
+    """Evenly sample up to max_points along a route's geometry."""
+    if not coords:
+        return []
+    if len(coords) <= max_points:
+        return coords
+    step = (len(coords) - 1) / (max_points - 1)
+    return [coords[int(round(i * step))] for i in range(max_points)]
+
+
+def traffic_along_route(coords):
+    """Traffic summary along a route, or a key-note string if unavailable.
+
+    Returns a single summary string (never raises).
+    """
+    if not _tomtom_key():
+        return (
+            "Live traffic unavailable: set VIKI_TOMTOM_KEY in .env "
+            "to enable TomTom traffic."
+        )
+    points = _sample_points(coords)
+    if not points:
+        return "No route geometry to check traffic against."
+    notes, slow = [], 0
+    for lon, lat in points:
+        summary, note = traffic_at(lat, lon)
+        if summary:
+            notes.append(summary)
+            if summary.startswith("Slow") or "closed" in summary:
+                slow += 1
+        elif note and "needs a TomTom" not in note and "failed" in note:
+            return note
+    if not notes:
+        return "No traffic data along this route."
+    if slow == 0:
+        return "Traffic is flowing freely along the route."
+    return f"Traffic along the route: {slow} of {len(notes)} checked points slow. " + "; ".join(notes)
+
+
+# --- agent tools (plain-language strings) ----------------------------------
+
+def maps_distance(origin, destination):
+    """Distance and drive time from one place to another."""
+    r, err = route(origin, destination)
+    if err:
+        return err
+    return (
+        f"{origin} to {destination}: {_fmt_miles(r['distance_m'])} "
+        f"(about {_fmt_minutes(r['duration_s'])} drive)."
+    )
+
+
+def maps_directions(origin, destination):
+    """Turn-by-turn directions, plus construction on the route."""
+    r, err = route(origin, destination)
+    if err:
+        return err
+    lines = [
+        f"Route: {origin} to {destination} — "
+        f"{_fmt_miles(r['distance_m'])}, about {_fmt_minutes(r['duration_s'])}.",
+    ]
+    for i, step in enumerate(r["steps"], 1):
+        lines.append(f"{i}. {step}")
+    if not r["steps"]:
+        lines.append("(No step-by-step directions returned.)")
+    works = construction_along_route(r["coords"])
+    if isinstance(works, str):
+        lines.append(f"Construction note: {works}")
+    elif works:
+        lines.append("Construction / roadworks on this route:")
+        lines.extend(f"- {w}" for w in works)
+    else:
+        lines.append("No construction reported on this route.")
+    return "\n".join(lines)
+
+
+def maps_traffic(origin, destination):
+    """Live traffic along the route between two places."""
+    r, err = route(origin, destination)
+    if err:
+        return err
+    summary = traffic_along_route(r["coords"])
+    return (
+        f"Traffic for {origin} to {destination} "
+        f"({_fmt_miles(r['distance_m'])}, about {_fmt_minutes(r['duration_s'])}):\n"
+        f"{summary}"
+    )
+
+
+def maps_configured():
+    """Maps tools need no key for geocoding, routing, or construction."""
+    return True
