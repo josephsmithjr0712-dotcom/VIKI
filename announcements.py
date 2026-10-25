@@ -17,8 +17,10 @@ and safe to call from any announcement path:
 
 Wired into ``connectors/home_mini.py`` ``announce()`` since v0.2.26
 (dedupe on by default; only successful announcements are recorded).
-Detecting phone-home + lights-on for the welcome-home trigger itself is
-still a later step; this module deliberately has no side effects on import.
+Phone-home + lights-on detection lives in ``presence.py`` (v0.2.29),
+and ``smart_announce.py`` (v0.2.31) ties presence + this log + the
+speaker into one presence-gated call for scheduler jobs. This module
+deliberately has no side effects on import.
 """
 
 import hashlib
