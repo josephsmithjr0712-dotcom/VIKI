@@ -213,10 +213,19 @@ def construction_along_route(coords):
         ");"
         "out tags center 50;"
     )
-    try:
-        data = _http_post(OVERPASS_URL, query)
-    except Exception as e:
-        return f"Construction check failed: {e}"
+    # Overpass is the flakiest of the map services (it timed out on a
+    # Millersburg -> Killbuck check): one retry before giving up, so a
+    # transient timeout doesn't blank the construction section.
+    data = None
+    last_error = None
+    for _attempt in range(2):
+        try:
+            data = _http_post(OVERPASS_URL, query)
+            break
+        except Exception as e:
+            last_error = e
+    if data is None:
+        return f"Construction check failed: {last_error}"
     found = []
     for el in data.get("elements", [])[:50]:
         tags = el.get("tags", {}) or {}

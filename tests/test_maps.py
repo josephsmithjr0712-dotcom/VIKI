@@ -160,6 +160,24 @@ class TestTools(unittest.TestCase):
         # Dedupe: the same road listed twice in Overpass appears once.
         self.assertEqual(out.count("State Route 83"), 1)
 
+    def test_construction_retries_once_then_succeeds(self):
+        with patch.object(
+            maps, "_http_post",
+            side_effect=[Exception("timeout"), _OVERPASS],
+        ) as mock_post:
+            out = maps.construction_along_route([(-81.9, 40.0), (-81.8, 40.1)])
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertIn("State Route 83 (roadwork)", out)
+
+    def test_construction_gives_up_after_two_failures(self):
+        with patch.object(
+            maps, "_http_post", side_effect=Exception("overpass down")
+        ) as mock_post:
+            out = maps.construction_along_route([(-81.9, 40.0)])
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertIsInstance(out, str)
+        self.assertIn("Construction check failed", out)
+
     def test_directions_construction_failure_is_note(self):
         with patch.object(maps, "_http_get_json") as mock_get, patch.object(
             maps, "_http_post", side_effect=Exception("overpass down")
