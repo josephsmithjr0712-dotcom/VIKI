@@ -372,7 +372,7 @@ async function speakEdge(text){
     if(!r.ok) throw new Error('tts '+r.status);
     const url=URL.createObjectURL(await r.blob());
     edgeAudio=new Audio(url);
-    edgeAudio.onended=edgeAudio.onerror=()=>{URL.revokeObjectURL(url);edgeAudio=null};
+    edgeAudio.onended=edgeAudio.onerror=()=>{URL.revokeObjectURL(url);edgeAudio=null;if(handsfreeOn)startListening()};
     edgeAudio.play();
   }catch(e){}
 }
@@ -441,7 +441,7 @@ async function send(text){
           turn.append(a); $('#statuslabel').textContent='Waiting for approval' }
         else if(kind==='done'){ ensureBubble(); bubble.classList.remove('cursor');
           if(data.type==='error'){bubble.classList.add('err');bubble.textContent=data.content} else {bubble.innerHTML=md(data.content||'(no answer)')}
-          if($('#speak').checked&&data.content){speakEdge(data.content)} }
+          if((handsfreeOn||$('#speak').checked)&&data.content){speakEdge(data.content)} }
         feed.scrollTop=feed.scrollHeight;
       }
     }
@@ -478,11 +478,15 @@ async function newSideChat(){ const r=await fetch('/api/chats',{method:'POST',he
 $('#new').onclick=()=>newSideChat();
 $('#newside').onclick=()=>newSideChat();
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-if(SR){const rec=new SR();rec.interimResults=false;let on=false;
+let rec=null, recOn=false, handsfreeOn=false;
+function startListening(){ if(!rec||recOn) return; try{rec.start();recOn=true;$('#mic').classList.add('on')}catch(e){} }
+function stopListening(){ if(!rec||!recOn) return; try{rec.stop()}catch(e){} }
+if(SR){rec=new SR();rec.interimResults=false;
   rec.onresult=e=>{input.value=(input.value+' '+e.results[0][0].transcript).trim();input.oninput()};
-  rec.onend=()=>{on=false;$('#mic').classList.remove('on')};
-  $('#mic').onclick=()=>{on?rec.stop():(rec.start(),on=true,$('#mic').classList.add('on'))}} else $('#mic').style.display='none';
-$('#handsfree').onclick=()=>{ $('#handsfree').classList.toggle('active'); };
+  rec.onend=()=>{recOn=false;$('#mic').classList.remove('on');if(handsfreeOn&&input.value.trim())send()};
+  $('#mic').onclick=()=>{recOn?stopListening():startListening()}} else $('#mic').style.display='none';
+$('#handsfree').onclick=()=>{ handsfreeOn=!handsfreeOn; $('#handsfree').classList.toggle('active',handsfreeOn);
+  if(handsfreeOn) startListening(); else { stopListening(); if(edgeAudio){edgeAudio.pause();edgeAudio=null} } };
 $('#logout').onclick=async()=>{ await fetch('/logout',{method:'POST'}); location.href='/login'; };
 // If the session expired, bounce to the login page.
 const _fetch = window.fetch;

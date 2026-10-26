@@ -53,6 +53,13 @@ class TestResponsiveUI(unittest.TestCase):
         self.assertIn("method:'DELETE'", self.js)
         self.assertIn("can't be deleted", self.js)
 
+    def test_handsfree_quick_reply_loop(self):
+        self.assertIn("handsfreeOn", self.js)
+        self.assertIn("function startListening", self.js)
+        self.assertIn("if(handsfreeOn&&input.value.trim())send()", self.js)
+        self.assertIn("handsfreeOn||$('#speak').checked", self.js)
+        self.assertIn("if(handsfreeOn)startListening()", self.js)
+
     def test_jump_to_latest_wired(self):
         self.assertIn('id="totop"', self.html)
         self.assertIn("totop", self.css)
