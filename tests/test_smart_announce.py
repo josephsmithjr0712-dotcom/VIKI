@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from announcements import AnnouncementLog  # noqa: E402
 from smart_announce import (  # noqa: E402
     WELCOME_HOME_TEXT,
+    announce_brief,
     announce_if_home,
     run_smart_job,
     welcome_home,
@@ -118,6 +119,46 @@ class SmartAnnounceTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "nothing to announce")
         self.assertEqual(speaker.calls, [])
+
+    # -- announce_brief ----------------------------------------------------
+    def test_brief_speaks_collapsed_when_home(self):
+        speaker = _Speaker()
+        brief = "Unread mail (last day):\nNo unread mail.\n\nCalendar (today):\nNo upcoming events."
+        ok, _ = announce_brief(brief, announce_fn=speaker,
+                               log=self.log, states=_home_states())
+        self.assertTrue(ok)
+        self.assertEqual(
+            speaker.calls,
+            ["Here's your brief. Unread mail (last day): No unread mail. "
+             "Calendar (today): No upcoming events."])
+
+    def test_brief_skips_when_lights_off(self):
+        speaker = _Speaker()
+        states = [_tracker("home"), _light("off")]
+        ok, reason = announce_brief("Some brief.", announce_fn=speaker,
+                                    log=self.log, states=states)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "lights off")
+        self.assertEqual(speaker.calls, [])
+
+    def test_brief_empty_never_speaks(self):
+        speaker = _Speaker()
+        ok, reason = announce_brief("  \n ", announce_fn=speaker,
+                                    log=self.log, states=_home_states())
+        self.assertFalse(ok)
+        self.assertEqual(reason, "nothing to announce")
+        self.assertEqual(speaker.calls, [])
+
+    def test_brief_never_repeats(self):
+        speaker = _Speaker()
+        ok, _ = announce_brief("Same brief.", announce_fn=speaker,
+                               log=self.log, states=_home_states())
+        self.assertTrue(ok)
+        ok, reason = announce_brief("Same brief.", announce_fn=speaker,
+                                    log=self.log, states=_home_states())
+        self.assertFalse(ok)
+        self.assertEqual(reason, "already announced")
+        self.assertEqual(len(speaker.calls), 1)
 
     # -- welcome_home ------------------------------------------------------
     def test_welcome_home_speaks_once_per_day(self):

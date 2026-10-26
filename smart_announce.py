@@ -118,6 +118,29 @@ def announce_if_home(text, announce_fn=None, log=None, states=None,
     return True, str(result)
 
 
+def announce_brief(brief, announce_fn=None, log=None, states=None,
+                   ping=None, phone_ip=None):
+    """Speak a scheduled connection-check brief, if Joey is home.
+
+    This is the morning-brief path: a scheduled connection-check job
+    saves its brief for the Settings screen AND speaks it on the Home
+    Mini — but only through the same gate as every other proactive
+    announcement (phone home + lights on, never repeated). A manual
+    /api/brief/refresh does NOT call this: when Joey refreshes by hand
+    he is looking at the screen, so speaking would just be noise.
+
+    The brief's newlines collapse to spaces for speech, behind a short
+    header. Returns announce_if_home's (ok, reason) tuple; an empty
+    brief never speaks.
+    """
+    text = " ".join((brief or "").split())
+    if not text:
+        return False, "nothing to announce"
+    spoken = "Here's your brief. " + text
+    return announce_if_home(spoken, announce_fn=announce_fn, log=log,
+                            states=states, ping=ping, phone_ip=phone_ip)
+
+
 def welcome_home(announce_fn=None, log=None, now=None, states=None,
                  ping=None, phone_ip=None):
     """Speak the welcome-home greeting if it is due, at most once a day.

@@ -170,8 +170,22 @@ def _run_connection_job(job):
     """Executor for scheduled jobs. Only 'connection-check' runs on its
     own today; anything else is recorded, not silently dropped."""
     if job.get("action") == "connection-check":
-        _save_brief(connection_check())
-        return "connection brief saved"
+        brief = connection_check()
+        _save_brief(brief)
+        # Morning-brief announcements (v0.3.7): a scheduled brief is
+        # spoken on the Home Mini when Joey is home (presence-gated,
+        # never repeated — see smart_announce.announce_brief). Speaking
+        # is best-effort: it never blocks saving the brief, and the
+        # outcome is recorded on the job for the scheduler's record.
+        try:
+            from smart_announce import announce_brief
+
+            ok, reason = announce_brief(brief)
+        except Exception as exc:  # noqa: BLE001 - recorded, not raised
+            return f"connection brief saved; brief not announced: {type(exc).__name__}"
+        if ok:
+            return "connection brief saved; brief announced"
+        return f"connection brief saved; brief not announced: {reason}"
     return f"No built-in action for {job.get('action')!r}."
 
 

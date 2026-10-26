@@ -326,6 +326,63 @@ class ServerContractTest(unittest.TestCase):
         self.assertIn("audio/mpeg", r.content_type)
         self.assertEqual(r.get_data(), b"ID3-FAKE-MP3")
 
+    # --- scheduled connection-check brief announcements (v0.3.7) --------
+    def _run_job_with(self, announce_result):
+        """Run a connection-check job with stubbed brief save + announce.
+
+        Returns (result string, saved briefs, announced briefs)."""
+        import smart_announce as _sa
+
+        saved, announced = [], []
+
+        def _fake_save(text):
+            saved.append(text)
+
+        def _fake_announce(brief, **_kwargs):
+            announced.append(brief)
+            return announce_result
+
+        orig_check = server_mod.connection_check
+        orig_save = server_mod._save_brief
+        orig_announce = _sa.announce_brief
+        try:
+            server_mod.connection_check = lambda: "Unread mail:\nNone."
+            server_mod._save_brief = _fake_save
+            _sa.announce_brief = _fake_announce
+            result = server_mod._run_connection_job(
+                {"action": "connection-check"})
+        finally:
+            server_mod.connection_check = orig_check
+            server_mod._save_brief = orig_save
+            _sa.announce_brief = orig_announce
+        return result, saved, announced
+
+    def test_connection_job_saves_and_announces_brief(self):
+        result, saved, announced = self._run_job_with((True, "Announced"))
+        self.assertEqual(result, "connection brief saved; brief announced")
+        self.assertEqual(saved, ["Unread mail:\nNone."])
+        self.assertEqual(announced, ["Unread mail:\nNone."])
+
+    def test_connection_job_records_skipped_announcement(self):
+        result, saved, announced = self._run_job_with((False, "lights off"))
+        self.assertEqual(
+            result, "connection brief saved; brief not announced: lights off")
+        self.assertEqual(saved, ["Unread mail:\nNone."])
+        self.assertEqual(announced, ["Unread mail:\nNone."])
+
+    def test_other_job_actions_never_announce(self):
+        import smart_announce as _sa
+
+        announced = []
+        orig_announce = _sa.announce_brief
+        try:
+            _sa.announce_brief = lambda brief, **_k: announced.append(brief)
+            result = server_mod._run_connection_job({"action": "nonsense"})
+        finally:
+            _sa.announce_brief = orig_announce
+        self.assertIn("No built-in action", result)
+        self.assertEqual(announced, [])
+
 
 if __name__ == "__main__":
     unittest.main()
