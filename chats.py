@@ -33,6 +33,48 @@ def _clean_id(raw):
     return cleaned or None
 
 
+def context_history(messages, keep=20):
+    """Build the history an agent turn actually sees (v0.3.8).
+
+    Short threads pass through unchanged (role/content only). For a
+    thread longer than ``keep`` messages, the older messages are replaced
+    by one deterministic summary entry — a count plus the first line of
+    each older user message (deduped, capped) — followed by the most
+    recent ``keep`` messages verbatim. Nothing is deleted from storage;
+    this only compresses what goes into the model's context, so a long
+    chat keeps its earlier topics instead of silently dropping them
+    past the 20-message window. Pure function, no model call, so the
+    summary is stable and testable.
+    """
+    try:
+        keep = int(keep)
+    except (TypeError, ValueError):
+        keep = 20
+    if keep < 1:
+        keep = 1
+    msgs = [{"role": m.get("role", ""), "content": m.get("content", "")}
+            for m in (messages or []) if isinstance(m, dict)]
+    if len(msgs) <= keep:
+        return msgs
+    older, recent = msgs[:-keep], msgs[-keep:]
+    topics = []
+    for m in older:
+        if m["role"] != "user":
+            continue
+        first = " ".join(str(m["content"]).splitlines()[:1]).strip()
+        first = " ".join(first.split())[:80]
+        if first and first not in topics:
+            topics.append(first)
+        if len(topics) >= 8:
+            break
+    if topics:
+        summary = (f"[Summary of the {len(older)} earlier messages in this "
+                   f"chat: {'; '.join(topics)}]")
+    else:
+        summary = f"[Summary of the {len(older)} earlier messages in this chat.]"
+    return [{"role": "system", "content": summary}] + recent
+
+
 class ChatStore:
     def __init__(self, folder=None):
         base = folder or os.getenv("VIKI_SESSION_DIR") or Path(__file__).resolve().parent / "session"

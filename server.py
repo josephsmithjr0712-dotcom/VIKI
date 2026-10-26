@@ -19,7 +19,7 @@ load_dotenv()
 from flask import Flask, Response, jsonify, request, send_from_directory, session
 
 from agent import VIKI
-from chats import ChatStore
+from chats import ChatStore, context_history
 from connectors.digest import connection_check
 from memory import SessionStore
 from profile import UserProfile
@@ -283,7 +283,7 @@ def chat_thread(body):
         return jsonify(error="empty message"), 400
     q, cancel = queue.Queue(), threading.Event()
     cancels[cid] = cancel
-    history = [{"role": m["role"], "content": m["content"]} for m in t["messages"][-20:]]
+    history = context_history(t["messages"])
 
     images, notes, consumed = [], [], []
     for aid in aids[:MAX_FILES]:
@@ -461,7 +461,7 @@ def chat():
         return jsonify(error="empty message"), 400
     s, q, cancel = get_session(sid), queue.Queue(), threading.Event()
     cancels[sid] = cancel
-    history = [{"role": m["role"], "content": m["content"]} for m in s["messages"][-20:]]
+    history = context_history(s["messages"])
 
     # Consume staged attachments (single-use IDs; unknown IDs are ignored).
     # Images go to the model; video becomes frames; text is inlined.

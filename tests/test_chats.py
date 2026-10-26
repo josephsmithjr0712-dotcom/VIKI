@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from chats import ChatStore
+from chats import ChatStore, context_history
 
 
 class TestChatStore(unittest.TestCase):
@@ -94,3 +94,49 @@ class TestChatStore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestContextHistory(unittest.TestCase):
+    """v0.3.8: long threads compress older messages into one summary."""
+
+    def _msgs(self, n):
+        out = []
+        for i in range(n):
+            role = "user" if i % 2 == 0 else "assistant"
+            out.append({"role": role, "content": f"msg {i}", "time": "t",
+                        "extra": "stripped"})
+        return out
+
+    def test_short_thread_passes_through(self):
+        msgs = self._msgs(5)
+        hist = context_history(msgs)
+        self.assertEqual(len(hist), 5)
+        self.assertTrue(all(set(m) == {"role", "content"} for m in hist))
+        self.assertEqual(hist[0]["content"], "msg 0")
+
+    def test_long_thread_summarizes_older_keeps_recent(self):
+        msgs = self._msgs(25)
+        hist = context_history(msgs)  # default keep=20
+        self.assertEqual(len(hist), 21)
+        self.assertEqual(hist[0]["role"], "system")
+        self.assertIn("5 earlier messages", hist[0]["content"])
+        self.assertIn("msg 0", hist[0]["content"])  # older user topic kept
+        self.assertEqual([m["content"] for m in hist[1:]],
+                         [f"msg {i}" for i in range(5, 25)])
+        self.assertNotIn("msg 1", [m["content"] for m in hist[1:]])
+
+    def test_summary_dedupes_and_caps_topics(self):
+        msgs = [{"role": "user", "content": "same topic"}] * 12 + self._msgs(20)
+        hist = context_history(msgs)
+        self.assertEqual(hist[0]["content"].count("same topic"), 1)
+
+    def test_no_user_messages_in_older_part(self):
+        msgs = [{"role": "assistant", "content": "a"}] * 5 + self._msgs(20)
+        hist = context_history(msgs)
+        self.assertIn("5 earlier messages", hist[0]["content"])
+        self.assertEqual(len(hist), 21)
+
+    def test_custom_keep(self):
+        hist = context_history(self._msgs(10), keep=3)
+        self.assertEqual(len(hist), 4)
+        self.assertEqual([m["content"] for m in hist[1:]], ["msg 7", "msg 8", "msg 9"])
