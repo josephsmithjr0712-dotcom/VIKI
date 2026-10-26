@@ -155,12 +155,18 @@ class ChatStore:
         return out
 
     def search(self, query, limit=20):
-        """Case-insensitive substring search across all threads.
-        Returns matches with a snippet around the hit; empty query
-        returns nothing."""
+        """Case-insensitive search across all threads (v0.3.9).
+
+        A single word matches as before (substring). A multi-word query
+        first tries the exact phrase, then falls back to matching any
+        message containing ALL the words, in any order — so searching
+        "onboarding date" finds "my onboarding is Monday, start date
+        to follow" instead of returning nothing. Returns matches with
+        a snippet around the hit; empty query returns nothing."""
         q = (query or "").strip().lower()
         if not q:
             return []
+        tokens = q.split()
         out = []
         for summary in self.list_threads(limit=200):
             thread = self.get(summary["id"])
@@ -170,6 +176,14 @@ class ChatStore:
                 content = str(m.get("content") or "")
                 low = content.lower()
                 at = low.find(q)
+                hit_len = len(q)
+                if at < 0 and len(tokens) > 1:
+                    # All-words fallback: every token present, any order.
+                    positions = [low.find(t) for t in tokens]
+                    if any(p < 0 for p in positions):
+                        continue
+                    at = min(positions)
+                    hit_len = len(tokens[positions.index(at)])
                 if at < 0:
                     continue
                 start = max(0, at - 40)
@@ -179,7 +193,7 @@ class ChatStore:
                     "kind": thread.get("kind", "side"),
                     "index": i,
                     "role": m.get("role", ""),
-                    "snippet": content[start:at + len(q) + 40],
+                    "snippet": content[start:at + hit_len + 40],
                 })
                 if len(out) >= limit:
                     return out
