@@ -356,6 +356,26 @@ def traffic_segments(coords):
     return segments or None
 
 
+def _adjusted_from_segments(segments, duration_s):
+    """Adjusted duration from already-sampled traffic segments, or None.
+
+    Shared by traffic_adjusted_duration() and take_map_payload() so the
+    map card and the text answer agree: same samples, same scaling.
+    Returns None when there are no usable samples or traffic is
+    essentially free-flowing (mean ratio >= 0.98).
+    """
+    if not segments:
+        return None
+    ratios = [s["ratio"] for s in segments
+              if not s.get("closed") and s["ratio"] > 0]
+    if not ratios:
+        return None
+    mean_ratio = sum(ratios) / len(ratios)
+    if mean_ratio >= 0.98:
+        return None
+    return duration_s / max(mean_ratio, 0.25)
+
+
 def traffic_adjusted_duration(coords, duration_s):
     """Traffic-adjusted drive time for a route, or None.
 
@@ -369,17 +389,7 @@ def traffic_adjusted_duration(coords, duration_s):
     as a sanity cap so one bad sample can't inflate the estimate past
     4x free flow. Never raises, never fakes.
     """
-    segments = traffic_segments(coords)
-    if not segments:
-        return None
-    ratios = [s["ratio"] for s in segments
-              if not s.get("closed") and s["ratio"] > 0]
-    if not ratios:
-        return None
-    mean_ratio = sum(ratios) / len(ratios)
-    if mean_ratio >= 0.98:
-        return None
-    return duration_s / max(mean_ratio, 0.25)
+    return _adjusted_from_segments(traffic_segments(coords), duration_s)
 
 
 # --- map-card payload ------------------------------------------------------
@@ -412,21 +422,30 @@ def take_map_payload(origin, destination):
     Returns None unless the cached route matches these exact endpoints,
     so the chat never shows a stale route. Geometry is [lat, lon] pairs
     (Leaflet order), downsampled. Traffic is None without a TomTom key.
+    duration_traffic_s is the traffic-adjusted ETA (None when traffic
+    is free-flowing or unavailable), matching the text answer.
     """
     cached = _LAST_ROUTE
     if not cached or cached.get("origin") != origin or cached.get("destination") != destination:
         return None
     r = cached["route"]
     geom = _simplify(r["coords"])
+    # Sample traffic once and derive the adjusted ETA from those same
+    # samples, so the card header matches the text answer (previously
+    # the card always showed the free-flow time, even when the text
+    # said "50 min with current traffic").
+    segments = traffic_segments(r["coords"])
+    adjusted = _adjusted_from_segments(segments, r["duration_s"])
     return {
         "origin": {"lat": r["from_lat"], "lon": r["from_lon"], "name": r["from_name"]},
         "destination": {"lat": r["to_lat"], "lon": r["to_lon"], "name": r["to_name"]},
         "geometry": [[lat, lon] for lon, lat in geom],
         "distance_m": r["distance_m"],
         "duration_s": r["duration_s"],
+        "duration_traffic_s": int(round(adjusted)) if adjusted else None,
         "links": map_links(origin, destination,
                            r["from_lat"], r["from_lon"], r["to_lat"], r["to_lon"]),
-        "traffic": traffic_segments(r["coords"]),
+        "traffic": segments,
     }
 
 

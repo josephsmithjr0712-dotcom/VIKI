@@ -263,6 +263,30 @@ class TestMapPayload(unittest.TestCase):
         self.assertIn("openstreetmap.org/directions", payload["links"]["osm"])
         self.assertIsNone(payload["traffic"])
 
+    def test_payload_carries_traffic_adjusted_duration(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 0.5, "closed": False}]
+        with patch.object(maps, "_http_get_json") as mock_get, patch.object(
+            maps, "_http_post"
+        ) as mock_post, patch.object(
+            maps, "traffic_segments", return_value=segs
+        ):
+            self._run_directions(mock_get, mock_post)
+            payload = maps.take_map_payload("A", "B")
+        # Route duration is 1500s; at half speed the card ETA is 3000s.
+        self.assertEqual(payload["duration_traffic_s"], 3000)
+        self.assertEqual(payload["duration_s"], 1500)
+
+    def test_payload_traffic_adjusted_none_when_free_flowing(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 1.0, "closed": False}]
+        with patch.object(maps, "_http_get_json") as mock_get, patch.object(
+            maps, "_http_post"
+        ) as mock_post, patch.object(
+            maps, "traffic_segments", return_value=segs
+        ):
+            self._run_directions(mock_get, mock_post)
+            payload = maps.take_map_payload("A", "B")
+        self.assertIsNone(payload["duration_traffic_s"])
+
     def test_payload_stale_endpoints_return_none(self):
         with patch.object(maps, "_http_get_json") as mock_get, patch.object(
             maps, "_http_post"

@@ -279,7 +279,12 @@ function renderMapCard(turn,m){
   const o=m.origin||{}, d=m.destination||{};
   const miles=(Number(m.distance_m)||0)/1609.344;
   const mins=Math.round((Number(m.duration_s)||0)/60);
-  const eta=mins<60?mins+' min':Math.floor(mins/60)+' hr '+(mins%60)+' min';
+  const _eta=n=>n<60?n+' min':Math.floor(n/60)+' hr '+(n%60)+' min';
+  // v0.2.34: when the payload carries a traffic-adjusted ETA, show it
+  // (with the free-flow time alongside) so the card matches the text
+  // answer; older payloads without the field render as before.
+  const tmins=Number(m.duration_traffic_s)?Math.round(Number(m.duration_traffic_s)/60):0;
+  const eta=tmins&&tmins!==mins?_eta(tmins)+' with traffic ('+_eta(mins)+' free flow)':_eta(mins);
   const glink=(m.links&&m.links.google)||'', olink=(m.links&&m.links.osm)||'';
   card.innerHTML='<div class="mhead"><div class="mroute">'+esc(o.name||'Start')+' <span class="marr">→</span> '+esc(d.name||'Destination')+'</div>'
     +'<div class="meta"><b>'+esc(miles.toFixed(1))+' miles</b> · <b>'+esc(eta)+'</b></div></div>'
