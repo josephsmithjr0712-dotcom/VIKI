@@ -20,6 +20,10 @@ runs a maps tool, it calls take_map_payload(origin, destination) to
 get the structured payload (geometry, endpoints, links, traffic
 segments) for the chat's map card — but only when the cached route
 matches those exact endpoints, so a stale route is never shown.
+
+Geocode lookups are cached in memory and on disk
+(workspace/geocode_cache.json), so repeat directions stay fast across
+server restarts.
 """
 
 import json
@@ -27,6 +31,7 @@ import math
 import os
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 USER_AGENT = "VIKI/0.2.27"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -82,13 +87,59 @@ def _fmt_minutes(seconds):
 # repeat directions (same places, asked again) pay two lookups each time.
 # Caching keeps those fast and stays polite to the free service. Only
 # successful lookups are cached, so a transient failure never sticks.
+# The cache is also written to disk, so repeat lookups stay fast across
+# server restarts. workspace/ survives VIKI's self-update, so the file
+# lives there; VIKI_GEOCODE_CACHE_FILE overrides the path (tests).
 _GEOCODE_CACHE = {}
 _GEOCODE_CACHE_MAX = 200
+_CACHE_FILE = (
+    Path(os.environ["VIKI_GEOCODE_CACHE_FILE"])
+    if os.environ.get("VIKI_GEOCODE_CACHE_FILE")
+    else Path(__file__).resolve().parent.parent / "workspace" / "geocode_cache.json"
+)
+_CACHE_LOADED = False
+
+
+def _load_geocode_cache():
+    """Load the disk cache once; a missing or corrupt file just means empty."""
+    global _CACHE_LOADED
+    if _CACHE_LOADED:
+        return
+    _CACHE_LOADED = True
+    try:
+        raw = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(raw, dict):
+        return
+    for key, val in list(raw.items())[:_GEOCODE_CACHE_MAX]:
+        try:
+            lat, lon, name = val
+            _GEOCODE_CACHE[str(key)] = (float(lat), float(lon), str(name))
+        except (TypeError, ValueError):
+            continue
+
+
+def _save_geocode_cache():
+    """Best-effort atomic write; a cache failure must never break directions."""
+    try:
+        _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_GEOCODE_CACHE), encoding="utf-8")
+        os.replace(tmp, _CACHE_FILE)
+    except Exception:
+        pass
 
 
 def clear_geocode_cache():
     """Drop all cached place lookups (tests, or a stale-entry reset)."""
+    global _CACHE_LOADED
     _GEOCODE_CACHE.clear()
+    _CACHE_LOADED = True
+    try:
+        _CACHE_FILE.unlink()
+    except Exception:
+        pass
 
 
 def geocode(place):
@@ -98,6 +149,7 @@ def geocode(place):
     """
     if not place or not str(place).strip():
         return None, "No place given to look up."
+    _load_geocode_cache()
     place_key = str(place).strip().lower()
     if place_key in _GEOCODE_CACHE:
         return _GEOCODE_CACHE[place_key], None
@@ -122,6 +174,7 @@ def geocode(place):
     if len(_GEOCODE_CACHE) >= _GEOCODE_CACHE_MAX:
         _GEOCODE_CACHE.pop(next(iter(_GEOCODE_CACHE)))
     _GEOCODE_CACHE[place_key] = result
+    _save_geocode_cache()
     return result, None
 
 
