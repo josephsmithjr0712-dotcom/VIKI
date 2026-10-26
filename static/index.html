@@ -477,6 +477,9 @@ async function openSession(sid, btn){
       if(cls==='user'){ d.innerHTML = `<div class="bubble">${md(m.content||'')}</div>`+(t?`<span class="ts">${esc(t)}</span>`:''); }
       else{ d.innerHTML = `<div class="bubble glass">${md(m.content||'')}</div>`+(t?`<span class="ts">${esc(t)}</span>`:''); }
       feed.append(d);
+      // v0.2.33: re-render any map cards stored on this message (server
+      // attaches the turn's map payloads to the assistant message).
+      if(m.maps) m.maps.forEach(mp=>renderMapCard(d, mp));
     });
     feed.scrollTop = feed.scrollHeight;
     session = sid;

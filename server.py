@@ -196,7 +196,15 @@ def chat():
     if notes:
         prompt = "\n\n".join(notes + ([prompt] if prompt else []))
 
+    # Map cards render live from the "map" SSE event, but a reopened session
+    # only has its stored messages — so keep this turn's map payloads and
+    # attach them to the stored assistant message (v0.2.33), letting the
+    # History tab re-render the cards instead of text alone.
+    turn_maps = []
+
     def emit(kind, payload):
+        if kind == "map":
+            turn_maps.append(payload)
         q.put({"kind": kind, "data": payload})
 
     def approve(cid, name, args):
@@ -211,8 +219,11 @@ def chat():
                            images=images or None)
             if res["type"] != "error":
                 now = datetime.now().isoformat(timespec="seconds")
-                s["messages"] += [{"role": "user", "content": prompt, "time": now},
-                                  {"role": "assistant", "content": res["content"], "time": now, "tools": res.get("tools")}]
+                assistant_msg = {"role": "assistant", "content": res["content"], "time": now,
+                                 "tools": res.get("tools")}
+                if turn_maps:
+                    assistant_msg["maps"] = turn_maps
+                s["messages"] += [{"role": "user", "content": prompt, "time": now}, assistant_msg]
             emit("done", res)
         finally:
             # Staged files are single-use: delete them whether the turn

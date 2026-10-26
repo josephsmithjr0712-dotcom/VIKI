@@ -201,6 +201,53 @@ class ServerContractTest(unittest.TestCase):
         self.assertIn('"kind": "done"', text)
         self.assertIn("echo: hello", text)
 
+    def test_chat_stores_map_payloads_for_history(self):
+        # v0.2.33: a map event during a turn must land on the stored
+        # assistant message so the History tab can re-render the card.
+        client, _ = self._login()
+        payload = {"origin": {"name": "Millersburg", "lat": 40.55, "lon": -81.92},
+                   "destination": {"name": "Killbuck", "lat": 40.49, "lon": -81.98},
+                   "distance_m": 16093, "duration_s": 1500,
+                   "geometry": [[40.55, -81.92], [40.49, -81.98]],
+                   "links": {"google": "https://example.invalid/g",
+                             "osm": "https://example.invalid/o"},
+                   "traffic": []}
+
+        class MapVIKI:
+            model = "test-model"
+
+            def __init__(self, toolbox):
+                pass
+
+            def warmup(self):
+                pass
+
+            def run(self, prompt, history, search, emit, approve, think, cancel, images=None):
+                emit("map", payload)
+                return {"type": "text", "content": "here is the route", "tools": []}
+
+            def extract_facts(self, *a, **k):
+                return []
+
+        old = server_mod.viki
+        try:
+            server_mod.viki = MapVIKI(None)
+            r = client.post("/api/chat", json={"session": "tmap", "message": "directions please"})
+            self.assertEqual(r.status_code, 200)
+            text = r.get_data(as_text=True)
+            self.assertIn('"kind": "map"', text)
+            msgs = server_mod.sessions["tmap"]["messages"]
+            self.assertEqual(msgs[-1]["role"], "assistant")
+            self.assertEqual(msgs[-1]["maps"], [payload])
+            # a turn with no map event stores no "maps" key at all
+            server_mod.viki = old
+            r = client.post("/api/chat", json={"session": "tmap", "message": "plain follow-up"})
+            self.assertEqual(r.status_code, 200)
+            r.get_data(as_text=True)
+            self.assertNotIn("maps", server_mod.sessions["tmap"]["messages"][-1])
+        finally:
+            server_mod.viki = old
+
     # --- approvals / stop / reset ----------------------------------------
     def test_approve_unknown_id_still_ok(self):
         client, _ = self._login()
