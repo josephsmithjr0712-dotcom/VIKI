@@ -62,6 +62,13 @@ class TestChatStore(unittest.TestCase):
         self.assertEqual(again["id"], main["id"])
         self.assertEqual(len(self.store.list_threads()), 1)
 
+    def test_main_chat_protected_from_delete(self):
+        main = self.store.ensure_main()
+        self.assertFalse(self.store.delete(main["id"], protect_main=True))
+        self.assertIsNotNone(self.store.get(main["id"]))
+        side = self.store.create(title="Side", kind="side")
+        self.assertTrue(self.store.delete(side["id"], protect_main=True))
+
     def test_side_chats_do_not_share_messages(self):
         a = self.store.create(title="A", kind="side")
         b = self.store.create(title="B", kind="side")

@@ -123,11 +123,16 @@ class ChatStore:
             return self.save(thread)
         return thread
 
-    def delete(self, thread_id):
-        """Delete a thread file. Returns True if one was removed."""
+    def delete(self, thread_id, protect_main=False):
+        """Delete a thread file. Returns True if one was removed.
+        With protect_main, the main chat refuses to go away."""
         tid = _clean_id(thread_id)
         if not tid:
             return False
+        if protect_main:
+            thread = self.get(tid)
+            if thread and thread.get("kind") == "main":
+                return False
         p = self._path(tid)
         if p.is_file():
             try:

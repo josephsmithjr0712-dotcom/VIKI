@@ -356,9 +356,12 @@ def chats_get(cid):
 
 @app.delete("/api/chats/<cid>")
 def chats_delete(cid):
-    threads.pop(cid, None)
-    if not chat_store.delete(cid):
+    if not chat_store.delete(cid, protect_main=True):
+        t = chat_store.get(cid)
+        if t and t.get("kind") == "main":
+            return jsonify(error="the main chat can't be deleted"), 400
         return jsonify(error="chat not found"), 404
+    threads.pop(cid, None)
     return jsonify(ok=True)
 
 

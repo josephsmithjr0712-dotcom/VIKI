@@ -211,7 +211,7 @@ details.tool pre{font:12px/1.5 var(--mono);color:var(--dim);padding:0 13px 12px;
   <main>
     <!-- CHAT -->
     <section class="tabpane" id="tab-chat">
-      <div class="chatbar"><select id="chatpick" aria-label="Choose chat"></select><button class="btn" id="newside">+ Side chat</button></div>
+      <div class="chatbar"><select id="chatpick" aria-label="Choose chat"></select><button class="btn" id="newside">+ Side chat</button><button class="btn" id="renamechat">Rename</button><button class="btn" id="delchat">Delete</button></div>
       <div id="feed"></div>
       <button class="totop glass" id="totop" aria-label="Jump to latest">↓ Latest</button>
       <div class="inputbar">
@@ -533,10 +533,12 @@ function renderTranscript(messages){
   });
   feed.scrollTop = feed.scrollHeight;
 }
+let chatList = [];
 async function loadChats(){
   try{
     const r = await fetch('/api/chats'); if(!r.ok) return;
     const {chats} = await r.json();
+    chatList = chats;
     const pick = $('#chatpick');
     pick.innerHTML = chats.map(c=>`<option value="${esc(c.id)}">${esc(c.title)}</option>`).join('');
     if(!chats.length) return;
@@ -556,6 +558,22 @@ async function switchChat(id){
   }catch(e){}
 }
 $('#chatpick').onchange=e=>switchChat(e.target.value);
+$('#renamechat').onclick=async()=>{
+  if(!chatId) return;
+  const cur = chatList.find(c=>c.id===chatId);
+  const title = prompt('Rename chat:', cur ? cur.title : '');
+  if(title === null) return;
+  const r = await fetch('/api/chats/'+encodeURIComponent(chatId)+'/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})});
+  if(r.ok) loadChats();
+};
+$('#delchat').onclick=async()=>{
+  if(!chatId) return;
+  const cur = chatList.find(c=>c.id===chatId);
+  if(cur && cur.kind==='main'){ alert("The main chat can't be deleted."); return; }
+  if(!confirm('Delete this chat?')) return;
+  const r = await fetch('/api/chats/'+encodeURIComponent(chatId),{method:'DELETE'});
+  if(r.ok){ chatId = null; await loadChats(); hero(); }
+};
 /* --- Profile, connections, scheduled checks (v0.3.0) --- */
 async function loadProfile(){
   try{

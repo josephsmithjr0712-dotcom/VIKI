@@ -46,6 +46,13 @@ class TestResponsiveUI(unittest.TestCase):
     def test_chat_switcher_does_not_overflow_narrow_screens(self):
         self.assertIn("min-width:0", self.css)
 
+    def test_rename_delete_buttons_wired(self):
+        self.assertIn('id="renamechat"', self.html)
+        self.assertIn('id="delchat"', self.html)
+        self.assertIn("/rename", self.js)
+        self.assertIn("method:'DELETE'", self.js)
+        self.assertIn("can't be deleted", self.js)
+
     def test_jump_to_latest_wired(self):
         self.assertIn('id="totop"', self.html)
         self.assertIn("totop", self.css)
