@@ -381,7 +381,8 @@ def chats_delete(cid):
 
 @app.get("/api/search")
 def search_chats():
-    """Search all chat threads for a substring. Query param q."""
+    """Search all chat threads. Multi-word queries match messages
+    containing all the words, in any order. Query param q."""
     q = request.args.get("q", "")
     return jsonify(results=chat_store.search(q))
 
