@@ -77,6 +77,20 @@ def _fmt_minutes(seconds):
 
 # --- geocoding -----------------------------------------------------------
 
+# Geocode cache: normalized place string -> (lat, lon, display_name).
+# Every route() call otherwise re-hits Nominatim for both endpoints, so
+# repeat directions (same places, asked again) pay two lookups each time.
+# Caching keeps those fast and stays polite to the free service. Only
+# successful lookups are cached, so a transient failure never sticks.
+_GEOCODE_CACHE = {}
+_GEOCODE_CACHE_MAX = 200
+
+
+def clear_geocode_cache():
+    """Drop all cached place lookups (tests, or a stale-entry reset)."""
+    _GEOCODE_CACHE.clear()
+
+
 def geocode(place):
     """Resolve a place/address to (lat, lon, display_name).
 
@@ -84,6 +98,9 @@ def geocode(place):
     """
     if not place or not str(place).strip():
         return None, "No place given to look up."
+    place_key = str(place).strip().lower()
+    if place_key in _GEOCODE_CACHE:
+        return _GEOCODE_CACHE[place_key], None
     query = urllib.parse.urlencode(
         {"q": str(place).strip(), "format": "json", "limit": 1}
     )
@@ -95,13 +112,17 @@ def geocode(place):
         return None, f"No match found for {place!r}."
     row = rows[0]
     try:
-        return (
+        result = (
             float(row["lat"]),
             float(row["lon"]),
             row.get("display_name", str(place)),
-        ), None
+        )
     except (KeyError, TypeError, ValueError):
         return None, f"Got an unexpected result looking up {place!r}."
+    if len(_GEOCODE_CACHE) >= _GEOCODE_CACHE_MAX:
+        _GEOCODE_CACHE.pop(next(iter(_GEOCODE_CACHE)))
+    _GEOCODE_CACHE[place_key] = result
+    return result, None
 
 
 # --- routing -------------------------------------------------------------

@@ -67,6 +67,11 @@ def _route_side_effect(*args, **kwargs):
 
 
 class TestGeocode(unittest.TestCase):
+    def setUp(self):
+        # Fresh cache per test: geocode() memoizes, and mocked
+        # HTTP per test must not see another test's entries.
+        maps.clear_geocode_cache()
+
     def test_parses_result(self):
         with patch.object(
             maps, "_http_get_json",
@@ -94,6 +99,11 @@ class TestGeocode(unittest.TestCase):
 
 
 class TestRoute(unittest.TestCase):
+    def setUp(self):
+        # Fresh cache per test: geocode() memoizes, and mocked
+        # HTTP per test must not see another test's entries.
+        maps.clear_geocode_cache()
+
     def _mocked(self, mock_get):
         mock_get.side_effect = [
             _nominatim(40.0, -81.9, "Start"),
@@ -133,6 +143,11 @@ class TestRoute(unittest.TestCase):
 
 
 class TestTools(unittest.TestCase):
+    def setUp(self):
+        # Fresh cache per test: geocode() memoizes, and mocked
+        # HTTP per test must not see another test's entries.
+        maps.clear_geocode_cache()
+
     def test_distance_output(self):
         with patch.object(maps, "_http_get_json") as mock_get:
             mock_get.side_effect = [
@@ -193,6 +208,11 @@ class TestTools(unittest.TestCase):
 
 
 class TestTraffic(unittest.TestCase):
+    def setUp(self):
+        # Fresh cache per test: geocode() memoizes, and mocked
+        # HTTP per test must not see another test's entries.
+        maps.clear_geocode_cache()
+
     def test_no_key_degrades_gracefully(self):
         with patch.dict(os.environ, {"VIKI_TOMTOM_KEY": ""}):
             (summary, note) = maps.traffic_at(40.0, -81.9)
@@ -225,6 +245,11 @@ class TestTraffic(unittest.TestCase):
 
 
 class TestMapPayload(unittest.TestCase):
+    def setUp(self):
+        # Fresh cache per test: geocode() memoizes, and mocked
+        # HTTP per test must not see another test's entries.
+        maps.clear_geocode_cache()
+
     def _run_directions(self, mock_get, mock_post):
         mock_get.side_effect = [
             _nominatim(40.0, -81.9, "Start Town"),
@@ -323,6 +348,11 @@ class TestMapPayload(unittest.TestCase):
 
 
 class TestTrafficAdjustedDuration(unittest.TestCase):
+    def setUp(self):
+        # Fresh cache per test: geocode() memoizes, and mocked
+        # HTTP per test must not see another test's entries.
+        maps.clear_geocode_cache()
+
     def test_no_traffic_returns_none(self):
         with patch.object(maps, "traffic_segments", return_value=None):
             self.assertIsNone(maps.traffic_adjusted_duration([], 1500))
