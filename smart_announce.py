@@ -29,6 +29,8 @@ a string starting with "Announced" (the home_mini.announce
 convention) — anything else counts as a failure and is not recorded.
 """
 
+import os
+
 try:
     from announcements import AnnouncementLog
 except Exception:  # pragma: no cover - import-path fallback, like home_mini
@@ -200,3 +202,80 @@ def run_smart_job(job, announce_fn=None, log=None, now=None,
                                       phone_ip=phone_ip)
         return f"announce-if-home: {'spoken' if ok else reason}"
     return f"unknown smart-announcement job: {action!r}"
+
+
+# --- urgent-email announcements (v0.3.10) ---------------------------------
+# The last unfinished piece of Joey's 2026-10-23 smart-announcement
+# request: a scheduled job that speaks urgent mail on the Home Mini.
+# What counts as "urgent" is configurable, not hardcoded to one guess:
+# VIKI_URGENT_SENDERS (comma-separated sender substrings) and
+# VIKI_URGENT_KEYWORDS (comma-separated, overrides the defaults below).
+# Until Joey sets his own list, the keyword defaults stay conservative
+# and the job itself is opt-in — nothing speaks until he creates the
+# scheduled task, and announce_if_home still gates on phone-home +
+# lights-on and never repeats a message.
+DEFAULT_URGENT_KEYWORDS = ("urgent", "emergency", "asap",
+                            "action required", "time-sensitive",
+                            "time sensitive")
+
+
+def _urgent_config(senders=None, keywords=None):
+    """Resolve urgency criteria: explicit args win, then env, then defaults."""
+    if senders is None:
+        senders = [s.strip() for s in os.getenv("VIKI_URGENT_SENDERS", "").split(",")
+                   if s.strip()]
+    if keywords is None:
+        env = [k.strip() for k in os.getenv("VIKI_URGENT_KEYWORDS", "").split(",")
+               if k.strip()]
+        keywords = env or list(DEFAULT_URGENT_KEYWORDS)
+    return [s.lower() for s in senders], [k.lower() for k in keywords]
+
+
+def is_urgent(message, senders=None, keywords=None):
+    """True if a Gmail message dict looks urgent.
+
+    Sender match is a case-insensitive substring on the From header
+    (so "gerresheimer.com" matches any sender at that domain); keyword
+    match scans the subject + snippet. A message with neither is not
+    urgent, whatever the sender's display name claims.
+    """
+    senders, keywords = _urgent_config(senders, keywords)
+    sender = str((message or {}).get("from", "")).lower()
+    if senders and any(s in sender for s in senders):
+        return True
+    haystack = (f"{(message or {}).get('subject', '')} "
+                f"{(message or {}).get('snippet', '')}").lower()
+    return any(k in haystack for k in keywords)
+
+
+def announce_urgent_emails(messages, announce_fn=None, log=None, states=None,
+                           ping=None, phone_ip=None, senders=None,
+                           keywords=None):
+    """Speak each urgent message in ``messages`` once, if Joey is home.
+
+    Non-urgent messages are silently skipped. Each spoken line goes
+    through announce_if_home, so the usual gates apply (phone home +
+    lights on, never repeated, failures not recorded). Returns a short
+    summary string for the scheduler job's record, e.g.
+    "urgent emails: 2 announced" or "no urgent emails".
+    """
+    urgent = [m for m in (messages or [])
+              if is_urgent(m, senders=senders, keywords=keywords)]
+    if not urgent:
+        return "no urgent emails"
+    spoken, skipped = 0, []
+    for message in urgent:
+        sender = str(message.get("from") or "someone").split("<")[0].strip() or "someone"
+        subject = str(message.get("subject") or "(no subject)").strip()
+        ok, reason = announce_if_home(
+            f"Urgent email from {sender}: {subject}.",
+            announce_fn=announce_fn, log=log, states=states, ping=ping,
+            phone_ip=phone_ip)
+        if ok:
+            spoken += 1
+        else:
+            skipped.append(reason)
+    summary = f"urgent emails: {spoken} announced"
+    if skipped:
+        summary += f", {len(skipped)} skipped ({', '.join(sorted(set(skipped)))})"
+    return summary

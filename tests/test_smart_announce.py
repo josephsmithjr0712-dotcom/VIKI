@@ -17,6 +17,8 @@ from smart_announce import (  # noqa: E402
     WELCOME_HOME_TEXT,
     announce_brief,
     announce_if_home,
+    announce_urgent_emails,
+    is_urgent,
     run_smart_job,
     welcome_home,
 )
@@ -217,6 +219,53 @@ class SmartAnnounceTest(unittest.TestCase):
                             announce_fn=speaker, log=self.log,
                             states=_home_states())
         self.assertIn("unknown smart-announcement job", out)
+
+    # -- urgent emails ------------------------------------------------------
+    def test_is_urgent_keyword_in_subject(self):
+        self.assertTrue(is_urgent({"from": "a@b.com", "subject": "URGENT: read this",
+                                   "snippet": ""}))
+        self.assertTrue(is_urgent({"from": "a@b.com", "subject": "Weekly digest",
+                                   "snippet": "action required by Friday"}))
+
+    def test_is_urgent_sender_match_is_substring(self):
+        self.assertTrue(is_urgent({"from": "HR Team <hr@gerresheimer.com>",
+                                   "subject": "Hello", "snippet": ""},
+                                  senders=["gerresheimer.com"], keywords=[]))
+
+    def test_is_urgent_rejects_plain_mail(self):
+        self.assertFalse(is_urgent({"from": "news@shop.com", "subject": "Sale!",
+                                    "snippet": "20% off today"}, keywords=["urgent"]))
+
+    def test_announce_urgent_emails_speaks_only_urgent(self):
+        speaker = _Speaker()
+        messages = [
+            {"from": "boss@example.com", "subject": "URGENT: server down",
+             "snippet": ""},
+            {"from": "news@shop.com", "subject": "Sale!", "snippet": ""},
+        ]
+        out = announce_urgent_emails(messages, announce_fn=speaker,
+                                     log=self.log, states=_home_states())
+        self.assertEqual(out, "urgent emails: 1 announced")
+        self.assertEqual(len(speaker.calls), 1)
+        self.assertIn("server down", speaker.calls[0])
+
+    def test_announce_urgent_emails_never_repeats(self):
+        speaker = _Speaker()
+        messages = [{"from": "boss@example.com", "subject": "URGENT: server down",
+                     "snippet": ""}]
+        announce_urgent_emails(messages, announce_fn=speaker,
+                               log=self.log, states=_home_states())
+        out = announce_urgent_emails(messages, announce_fn=speaker,
+                                     log=self.log, states=_home_states())
+        self.assertIn("0 announced", out)
+        self.assertIn("already announced", out)
+        self.assertEqual(len(speaker.calls), 1)
+
+    def test_announce_urgent_emails_empty(self):
+        self.assertEqual(announce_urgent_emails([], announce_fn=_Speaker(),
+                                                log=self.log,
+                                                states=_home_states()),
+                         "no urgent emails")
 
 
 if __name__ == "__main__":

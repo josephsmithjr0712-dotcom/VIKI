@@ -383,6 +383,41 @@ class ServerContractTest(unittest.TestCase):
         self.assertIn("No built-in action", result)
         self.assertEqual(announced, [])
 
+    # --- urgent-email-check jobs (v0.3.10) --------------------------------
+    def _run_urgent_job(self, token=True, messages=None, search_error=False):
+        import connectors.google as _g
+        import smart_announce as _sa
+
+        orig_token = _g.token_exists
+        orig_search = _g.gmail_search_structured
+        orig_announce = _sa.announce_urgent_emails
+        try:
+            _g.token_exists = lambda: token
+            if search_error:
+                def _boom(*_a, **_k):
+                    raise RuntimeError("boom")
+                _g.gmail_search_structured = _boom
+            else:
+                _g.gmail_search_structured = lambda *a, **k: messages or []
+            _sa.announce_urgent_emails = lambda msgs: "urgent emails: 1 announced"
+            return server_mod._run_connection_job({"action": "urgent-email-check"})
+        finally:
+            _g.token_exists = orig_token
+            _g.gmail_search_structured = orig_search
+            _sa.announce_urgent_emails = orig_announce
+
+    def test_urgent_job_announces(self):
+        result = self._run_urgent_job(messages=[{"from": "a@b.com"}])
+        self.assertEqual(result, "urgent-email-check: urgent emails: 1 announced")
+
+    def test_urgent_job_without_google_records_not_connected(self):
+        result = self._run_urgent_job(token=False)
+        self.assertEqual(result, "urgent-email-check: Google not connected")
+
+    def test_urgent_job_search_failure_is_recorded(self):
+        result = self._run_urgent_job(search_error=True)
+        self.assertIn("urgent-email-check failed", result)
+
 
 if __name__ == "__main__":
     unittest.main()

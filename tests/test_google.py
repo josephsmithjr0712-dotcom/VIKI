@@ -39,6 +39,30 @@ class TestGmail(TestCase):
         with patch.object(g, "_service", return_value=svc):
             self.assertEqual(g.gmail_search("zzz"), "No messages found.")
 
+    def test_search_structured_returns_dicts(self):
+        svc = MagicMock()
+        svc.users().messages().list().execute.return_value = {"messages": [{"id": "m1"}]}
+        svc.users().messages().get().execute.return_value = {
+            "snippet": "please read asap",
+            "payload": {"headers": [
+                {"name": "From", "value": "boss@example.com"},
+                {"name": "Subject", "value": "Urgent thing"},
+                {"name": "Date", "value": "Mon, 26 Oct 2026"},
+            ]},
+        }
+        with patch.object(g, "_service", return_value=svc):
+            out = g.gmail_search_structured("in:inbox newer_than:1d")
+        self.assertEqual(out, [{"id": "m1", "from": "boss@example.com",
+                                "subject": "Urgent thing",
+                                "date": "Mon, 26 Oct 2026",
+                                "snippet": "please read asap"}])
+
+    def test_search_structured_no_results_is_empty_list(self):
+        svc = MagicMock()
+        svc.users().messages().list().execute.return_value = {}
+        with patch.object(g, "_service", return_value=svc):
+            self.assertEqual(g.gmail_search_structured("zzz"), [])
+
     def test_read_extracts_plain_text(self):
         svc = MagicMock()
         svc.users().messages().get().execute.return_value = {

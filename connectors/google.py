@@ -94,6 +94,46 @@ def gmail_search(query, max_results=5):
     return "\n\n".join(out)
 
 
+def gmail_search_structured(query, max_results=10):
+    """Same Gmail search as gmail_search, but structured for automation.
+
+    Returns a list of dicts with keys id, from, subject, date, snippet —
+    the shape scheduled jobs need (e.g. urgent-email announcements).
+    No messages -> []. A failed list call raises RuntimeError so a
+    caller can tell "search failed" apart from "nothing found"; a
+    single message that fails to fetch yields a dict with just its id.
+    """
+    svc = _service("gmail", "v1")
+    try:
+        resp = (
+            svc.users().messages().list(userId="me", q=query, maxResults=int(max_results)).execute()
+        )
+    except Exception as e:
+        raise RuntimeError(f"Gmail search failed: {e}")
+    out = []
+    for m in resp.get("messages", []):
+        try:
+            full = (
+                svc.users()
+                .messages()
+                .get(userId="me", id=m["id"], format="metadata",
+                     metadataHeaders=["From", "Subject", "Date"])
+                .execute()
+            )
+            hdr = {h["name"]: h["value"] for h in full["payload"].get("headers", [])}
+            out.append({
+                "id": m["id"],
+                "from": hdr.get("From", ""),
+                "subject": hdr.get("Subject", ""),
+                "date": hdr.get("Date", ""),
+                "snippet": full.get("snippet", ""),
+            })
+        except Exception:  # noqa: BLE001 - one bad message must not kill the batch
+            out.append({"id": m["id"], "from": "", "subject": "",
+                        "date": "", "snippet": ""})
+    return out
+
+
 def _body_from_payload(payload) -> str:
     """Extract readable text from a Gmail message payload (recursive)."""
     mime = payload.get("mimeType", "")
