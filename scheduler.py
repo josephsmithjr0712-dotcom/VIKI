@@ -47,7 +47,13 @@ def _slug(name: str) -> str:
 
 class Scheduler:
     def __init__(self, folder=None):
-        base = folder or os.getenv("VIKI_SCHEDULER_DIR") or Path(__file__).resolve().parent / "scheduler"
+        # Folder order: explicit arg, VIKI_SCHEDULER_DIR, then the session
+        # dir (so tests that point VIKI_SESSION_DIR at a temp dir stay
+        # hermetic), then <repo>/scheduler.
+        session_dir = os.getenv("VIKI_SESSION_DIR")
+        base = (folder or os.getenv("VIKI_SCHEDULER_DIR")
+                or (str(Path(session_dir) / "scheduler") if session_dir else None)
+                or Path(__file__).resolve().parent / "scheduler")
         self.dir = Path(base)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.tasks_path = self.dir / "tasks.json"

@@ -35,6 +35,9 @@ button{font:inherit;color:inherit;cursor:pointer;background:none;border:0}
 .app{position:relative;z-index:2;height:100%;max-width:560px;margin:0 auto;display:flex;flex-direction:column;padding:0 0 8px}
 /* --- Top bar --- */
 .topbar{display:flex;align-items:center;gap:10px;padding:14px 16px 10px}
+.chatbar{display:flex;gap:8px;padding:0 14px 8px}
+.chatbar select{flex:1;background:rgba(255,255,255,.08);color:inherit;border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:8px 10px;font:inherit}
+.chatbar .btn{border:1px solid rgba(255,255,255,.16);border-radius:12px;padding:8px 12px;background:rgba(255,255,255,.06);color:inherit;font:inherit;cursor:pointer;white-space:nowrap}
 .topbar h1{font-size:22px;font-weight:600;letter-spacing:-.01em;flex:1}
 .pill{display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:99px;font-size:12px;font-weight:500}
 .pill .sdot{width:8px;height:8px;border-radius:50%;background:var(--mint);box-shadow:0 0 8px var(--mint)}
@@ -184,6 +187,7 @@ details.tool pre{font:12px/1.5 var(--mono);color:var(--dim);padding:0 13px 12px;
   <main>
     <!-- CHAT -->
     <section class="tabpane" id="tab-chat">
+      <div class="chatbar"><select id="chatpick" aria-label="Choose chat"></select><button class="btn" id="newside">+ Side chat</button></div>
       <div id="feed"></div>
       <div class="inputbar">
         <div class="staged" id="staged" hidden></div>
@@ -213,6 +217,14 @@ details.tool pre{font:12px/1.5 var(--mono);color:var(--dim);padding:0 13px 12px;
         <div class="setcard glass"><h3>What I remember</h3><div class="mem" id="mem"></div>
           <form class="mrow" id="memform"><input type="text" id="memin" placeholder="Add a fact" autocomplete="off"><button class="btn primary" style="padding:9px 14px">Add</button></form>
         </div>
+        <div class="setcard glass"><h3>About you</h3><div class="mem" id="prof"></div>
+          <form class="mrow" id="profform"><select id="profkind"><option value="like">Like</option><option value="dislike">Dislike</option><option value="hobby">Hobby</option><option value="favorite">Favorite</option><option value="note">Note</option></select><input type="text" id="profval" placeholder="e.g. black coffee" autocomplete="off"><input type="text" id="profkey" placeholder="key, e.g. coffee" autocomplete="off" style="display:none"><button class="btn primary" style="padding:9px 14px">Add</button></form>
+        </div>
+        <div class="setcard glass"><h3>Connections</h3><div class="mem" id="brief"><p class="empty-note">No check yet.</p></div>
+          <button class="btn primary" id="briefnow" style="width:100%;margin-top:8px;padding:10px">Check connections now</button>
+          <div class="mem" id="tasks" style="margin-top:10px"></div>
+          <form class="mrow" id="taskform"><input type="text" id="taskname" placeholder="Check name" autocomplete="off" value="Morning connection check"><input type="time" id="taskat" value="07:00"><button class="btn primary" style="padding:9px 14px">Daily check</button></form>
+        </div>
         <div class="setcard glass"><h3>Tools</h3><div class="tools" id="tools"></div></div>
         <div class="setcard glass"><h3>Connectors</h3><div class="conns" id="conns"></div></div>
       </div>
@@ -226,7 +238,7 @@ details.tool pre{font:12px/1.5 var(--mono);color:var(--dim);padding:0 13px 12px;
 </div>
 <script>
 const $=s=>document.querySelector(s), sid=(crypto.randomUUID?crypto.randomUUID():String(Date.now()));
-let session=sid, busy=false;
+let session=sid, chatId=null, busy=false;
 const feed=$('#feed'), input=$('#input');
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const SUGG=["Turn on the lamp","What's the weather today?","What devices can you see?","What's on my calendar?"];
@@ -238,6 +250,7 @@ document.querySelectorAll('.navpill button').forEach(b=>b.onclick=()=>{
   $('#tab-'+b.dataset.tab).hidden=false;
   $('#tabtitle').textContent = b.dataset.tab==='chat' ? 'VIKI' : b.dataset.tab==='history' ? 'History' : 'Settings';
   if(b.dataset.tab==='history') loadHistory();
+  if(b.dataset.tab==='settings'){ loadProfile(); loadBrief(); loadTasks(); }
 });
 function md(t){
   let s=esc(t).replace(/```(\w*)\n?([\s\S]*?)```/g,(_,l,c)=>`<pre><code>${c}</code></pre>`);
@@ -369,6 +382,7 @@ $('#attach').onchange=async e=>{
 };
 async function send(text){
   text=(text||input.value).trim(); if((!text&&!staged.length)||busy) return;
+  if(!chatId) await loadChats();
   if(feed.querySelector('.empty')) feed.innerHTML='';
   input.value=''; input.style.height='auto';
   const attIds=staged.map(s=>s.id);
@@ -379,7 +393,7 @@ async function send(text){
   const ensureBubble=()=>{if(!bubble){bubble=document.createElement('div');bubble.className='bubble glass cursor';turn.insertBefore(bubble,turn.querySelector('.ts'))}};
   setBusy(true);
   try{
-    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,message:text,think:$('#think').checked,attachments:attIds})});
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,chat:chatId,message:text,think:$('#think').checked,attachments:attIds})});
     const rd=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await rd.read(); if(done) break;
@@ -434,8 +448,10 @@ input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}}
 document.addEventListener('keydown',e=>{if(e.key==='/'&&!/INPUT|TEXTAREA/.test(document.activeElement.tagName)){e.preventDefault();input.focus()}});
 input.oninput=()=>{input.style.height='auto';input.style.height=input.scrollHeight+'px';$('#send').classList.toggle('ready',input.value.trim().length>0)};
 $('#send').onclick=()=>send();
-$('#stop').onclick=()=>fetch('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session})});
-$('#new').onclick=async()=>{await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session})});session=(crypto.randomUUID?crypto.randomUUID():String(Date.now()));hero();loadState();loadHistory()};
+$('#stop').onclick=()=>fetch('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,chat:chatId})});
+async function newSideChat(){ const r=await fetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}); const j=await r.json(); await loadChats(); if(j.chat) switchChat(j.chat.id); }
+$('#new').onclick=()=>newSideChat();
+$('#newside').onclick=()=>newSideChat();
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 if(SR){const rec=new SR();rec.interimResults=false;let on=false;
   rec.onresult=e=>{input.value=(input.value+' '+e.results[0][0].transcript).trim();input.oninput()};
@@ -473,24 +489,82 @@ async function openSession(sid, btn){
     const {session: s} = await r.json();
     // switch to chat tab and render
     document.querySelector('[data-tab="chat"]').click();
-    feed.innerHTML = '';
-    (s.messages||[]).forEach(m=>{
-      const cls = m.role === 'user' ? 'user' : 'agent';
-      const d = document.createElement('div');
-      d.className = 'msg '+cls;
-      const t = m.time ? new Date(m.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
-      if(cls==='user'){ d.innerHTML = `<div class="bubble">${md(m.content||'')}</div>`+(t?`<span class="ts">${esc(t)}</span>`:''); }
-      else{ d.innerHTML = `<div class="bubble glass">${md(m.content||'')}</div>`+(t?`<span class="ts">${esc(t)}</span>`:''); }
-      feed.append(d);
-      // v0.2.33: re-render any map cards stored on this message (server
-      // attaches the turn's map payloads to the assistant message).
-      if(m.maps) m.maps.forEach(mp=>renderMapCard(d, mp));
-    });
-    feed.scrollTop = feed.scrollHeight;
+    renderTranscript(s.messages||[]);
     session = sid;
   }catch(e){}
 }
-hero(); loadState(); loadHistory();
+/* --- Main + side chats (v0.3.0) --- */
+function renderTranscript(messages){
+  feed.innerHTML = '';
+  messages.forEach(m=>{
+    const cls = m.role === 'user' ? 'user' : 'agent';
+    const d = document.createElement('div');
+    d.className = 'msg '+cls;
+    const t = m.time ? new Date(m.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+    if(cls==='user'){ d.innerHTML = `<div class="bubble">${md(m.content||'')}</div>`+(t?`<span class="ts">${esc(t)}</span>`:''); }
+    else{ d.innerHTML = `<div class="bubble glass">${md(m.content||'')}</div>`+(t?`<span class="ts">${esc(t)}</span>`:''); }
+    feed.append(d);
+    if(m.maps) m.maps.forEach(mp=>renderMapCard(d, mp));
+  });
+  feed.scrollTop = feed.scrollHeight;
+}
+async function loadChats(){
+  try{
+    const r = await fetch('/api/chats'); if(!r.ok) return;
+    const {chats} = await r.json();
+    const pick = $('#chatpick');
+    pick.innerHTML = chats.map(c=>`<option value="${esc(c.id)}">${esc(c.title)}</option>`).join('');
+    if(!chats.length) return;
+    if(!chatId || !chats.some(c=>c.id===chatId)){
+      const main = chats.find(c=>c.kind==='main') || chats[0];
+      chatId = main.id;
+    }
+    pick.value = chatId;
+  }catch(e){}
+}
+async function switchChat(id){
+  try{
+    const r = await fetch('/api/chats/'+encodeURIComponent(id)); if(!r.ok) return;
+    const {chat} = await r.json();
+    chatId = chat.id; $('#chatpick').value = chatId;
+    if(!(chat.messages||[]).length) hero(); else renderTranscript(chat.messages);
+  }catch(e){}
+}
+$('#chatpick').onchange=e=>switchChat(e.target.value);
+/* --- Profile, connections, scheduled checks (v0.3.0) --- */
+async function loadProfile(){
+  try{
+    const {profile} = await (await fetch('/api/profile')).json();
+    const sections = [['Likes', profile.likes, 'like'], ['Dislikes', profile.dislikes, 'dislike'], ['Hobbies', profile.hobbies, 'hobby'], ['Notes', profile.notes, 'note']];
+    let html = sections.filter(([,v])=>v.length).map(([label, vals, kind])=>`<div><b>${label}:</b> ${vals.map(v=>`<span>${esc(v)}</span><button data-kind="${kind}" data-val="${esc(v)}" aria-label="Forget">×</button>`).join(' ')}</div>`).join('');
+    if(Object.keys(profile.favorites).length) html += `<div><b>Favorites:</b> ${Object.entries(profile.favorites).map(([k,v])=>`<span>${esc(k)}: ${esc(v)}</span><button data-kind="favorite" data-val="${esc(k)}" aria-label="Forget">×</button>`).join(' ')}</div>`;
+    $('#prof').innerHTML = html || '<p class="empty-note">Nothing yet. Tell me what you like and I\'ll remember it.</p>';
+    $('#prof').querySelectorAll('button').forEach(b=>b.onclick=async()=>{ await fetch('/api/profile',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:b.dataset.kind,value:b.dataset.val})}); loadProfile(); });
+  }catch(e){}
+}
+$('#profkind').onchange=e=>{ $('#profkey').style.display = e.target.value==='favorite' ? '' : 'none'; };
+$('#profform').onsubmit=async e=>{ e.preventDefault(); const kind=$('#profkind').value, value=$('#profval').value.trim(); if(!value) return;
+  await fetch('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind, value, favorite_key:$('#profkey').value.trim()})});
+  $('#profval').value=''; $('#profkey').value=''; loadProfile(); };
+async function loadBrief(){
+  try{
+    const {brief} = await (await fetch('/api/brief')).json();
+    $('#brief').innerHTML = brief && brief.latest ? `<div><span>${esc(brief.latest)}</span><br><small>Updated ${esc(brief.updated||'')}</small></div>` : '<p class="empty-note">No check yet.</p>';
+  }catch(e){}
+}
+$('#briefnow').onclick=async()=>{ $('#briefnow').textContent='Checking…'; const {brief} = await (await fetch('/api/brief/refresh',{method:'POST'})).json(); $('#briefnow').textContent='Check connections now'; $('#brief').innerHTML = `<div><span>${esc(brief.latest)}</span><br><small>Updated ${esc(brief.updated||'')}</small></div>`; };
+async function loadTasks(){
+  try{
+    const {tasks} = await (await fetch('/api/tasks')).json();
+    $('#tasks').innerHTML = tasks.length ? tasks.map(t=>{ const when = t.kind==='daily' ? 'daily at '+t.at : 'every '+t.every_minutes+' min'; return `<div><span>[${esc(t.id)}] ${esc(t.name)} — ${esc(when)} — ${t.enabled?'on':'off'}</span><button data-jid="${esc(t.id)}" aria-label="Delete">×</button></div>`; }).join('') : '<p class="empty-note">No scheduled checks.</p>';
+    $('#tasks').querySelectorAll('button').forEach(b=>b.onclick=async()=>{ await fetch('/api/tasks/'+encodeURIComponent(b.dataset.jid),{method:'DELETE'}); loadTasks(); });
+  }catch(e){}
+}
+$('#taskform').onsubmit=async e=>{ e.preventDefault(); const name=$('#taskname').value.trim(), at=$('#taskat').value; if(!name||!at) return;
+  const r = await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name, kind:'daily', at})});
+  if(!r.ok){ const j = await r.json(); alert('Could not schedule: '+(j.error||r.status)); return; }
+  loadTasks(); };
+hero(); loadState(); loadHistory(); loadChats();
 </script>
 </body>
 </html>

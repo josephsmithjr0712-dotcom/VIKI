@@ -33,6 +33,8 @@ How you work:
 - If a tool fails or returns nothing useful, try a different query or approach before giving up.
 - Answer simple questions and chit-chat directly, with no tools.
 - Save lasting facts about the user with remember (never secrets).
+- When the user states a lasting like, dislike, hobby, or favorite, save it with update_profile so future answers fit them better. Check get_profile when tailoring a recommendation.
+- You can check the user's connections any time with check_connections (unread Gmail + today's calendar), and set up recurring checks with schedule_task (asks approval) — e.g. a morning brief.
 - Risky actions (writing files, controlling devices) ask the user for approval. If denied, adapt and offer alternatives.
 - Finish with a concise answer in plain language. Mention source URLs when you used the web. Never print raw JSON or tool schemas."""
 
@@ -161,7 +163,7 @@ class VIKI:
                     continue
                 raise
 
-    def run(self, prompt, history, memory, emit, approve, think=False, cancel=None, images=None):
+    def run(self, prompt, history, memory, emit, approve, think=False, cancel=None, images=None, profile=""):
         """Run the agent loop. emit(kind, payload) streams events; approve(name, args) -> bool.
         memory is a list of fact strings, or a callable(query) -> list for relevance-ranked recall.
         images: optional list of raw image bytes attached to this turn (Ollama vision format).
@@ -182,6 +184,8 @@ class VIKI:
         facts = memory(prompt) if callable(memory) else (memory or [])
         if facts:
             system += "\n\nKnown about the user (use when relevant, don't recite):\n" + "\n".join(f"- {m}" for m in facts)
+        if profile:
+            system += "\n\nUser profile (likes, dislikes, hobbies, favorites — use to tailor answers, don't recite):\n" + profile
         messages = [{"role": "system", "content": system}, *history]
         user_msg = {"role": "user", "content": prompt}
         if images:

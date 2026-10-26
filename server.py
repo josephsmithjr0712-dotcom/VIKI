@@ -19,7 +19,11 @@ load_dotenv()
 from flask import Flask, Response, jsonify, request, send_from_directory, session
 
 from agent import VIKI
+from chats import ChatStore
+from connectors.digest import connection_check
 from memory import SessionStore
+from profile import UserProfile
+from scheduler import Scheduler
 from tools import Toolbox, WORKSPACE, refresh_ha_entities, ha_entities_text
 from uploads import stage_files, discard, video_frames, read_text, UploadError, MAX_BYTES, MAX_FILES
 
@@ -110,6 +114,15 @@ def logout():
     return jsonify(ok=True)
 
 store = SessionStore()
+chat_store = ChatStore()
+user_profile = UserProfile()
+task_scheduler = Scheduler()
+# Grow the profile from what VIKI already remembers (no model call: just
+# pattern-matching over stored facts). Runs once at startup.
+try:
+    user_profile.import_from_facts(store.memory_texts())
+except Exception:
+    pass
 viki = VIKI(Toolbox(store))
 # Pre-load the LLM at startup so the first request doesn't pay load time.
 # Runs in a thread so a slow/unreachable Ollama doesn't block server boot.
@@ -118,6 +131,83 @@ threading.Thread(target=viki.warmup, daemon=True).start()
 threading.Thread(target=refresh_ha_entities, daemon=True).start()
 AUTO_MEMORY = os.getenv("VIKI_AUTO_MEMORY", "on").lower() != "off"
 sessions, approvals, cancels = {}, {}, {}
+# Live chat threads (main + side chats), keyed by thread id. Persisted via
+# ChatStore on every checkpoint; the dict is just a working cache.
+threads = {}
+
+
+def _brief_path():
+    return task_scheduler.dir / "brief.json"
+
+
+def _load_brief():
+    try:
+        data = json.loads(_brief_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {"latest": None, "updated": None, "history": []}
+
+
+def _save_brief(text):
+    """Persist the latest connection-check brief (history capped at 7)."""
+    data = _load_brief()
+    now = datetime.now().isoformat(timespec="seconds")
+    data["latest"] = text
+    data["updated"] = now
+    history = data.get("history") or []
+    history.append({"at": now, "brief": text})
+    data["history"] = history[-7:]
+    tmp = _brief_path().with_name("brief.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _brief_path())
+    return data
+
+
+def _run_connection_job(job):
+    """Executor for scheduled jobs. Only 'connection-check' runs on its
+    own today; anything else is recorded, not silently dropped."""
+    if job.get("action") == "connection-check":
+        _save_brief(connection_check())
+        return "connection brief saved"
+    return f"No built-in action for {job.get('action')!r}."
+
+
+def _scheduler_tick():
+    """Background loop: every 60s, run due jobs. Never dies on an error —
+    a failed tick just means the next minute's tick tries again."""
+    while True:
+        time.sleep(60)
+        try:
+            task_scheduler.run_due(_run_connection_job)
+        except Exception:
+            pass
+
+
+threading.Thread(target=_scheduler_tick, daemon=True).start()
+
+
+def get_thread(cid):
+    """Live thread by id, loading from disk if needed. None if unknown."""
+    if cid in threads:
+        return threads[cid]
+    t = chat_store.get(cid)
+    if t:
+        t.setdefault("archived", 0)
+        threads[cid] = t
+    return threads.get(cid)
+
+
+def checkpoint_thread(t):
+    """Persist a thread + extract durable facts, mirroring checkpoint()."""
+    chat_store.save(t)
+    if AUTO_MEMORY:
+        texts = [m["content"] for m in t["messages"][t.get("archived", 0):] if m["role"] == "user"]
+        if len(texts) >= 3:
+            store.add_facts(viki.extract_facts(texts, store.memory_texts()), source=t["id"], limit=5)
+            t["archived"] = len(t["messages"])
 
 
 def get_session(sid):
@@ -145,7 +235,8 @@ def index():
 @app.get("/api/state")
 def state():
     return jsonify(model=viki.model, tools=viki.toolbox.enabled, memory=store.memory_texts(),
-                   files=len(list(WORKSPACE.rglob("*"))), warning=store.warning)
+                   files=len(list(WORKSPACE.rglob("*"))), warning=store.warning,
+                   profile=user_profile.text())
 
 
 @app.get("/api/sessions")
@@ -163,9 +254,181 @@ def session_load(sid):
     return jsonify(session=data)
 
 
+def chat_thread(body):
+    """SSE chat turn inside a main/side thread (v0.3.0). Mirrors the
+    legacy session handler, but history and storage belong to the thread,
+    and the user profile is passed into the agent run."""
+    cid = body.get("chat")
+    t = get_thread(cid)
+    if not t:
+        return jsonify(error="chat not found"), 404
+    prompt = (body.get("message") or "").strip()
+    think = bool(body.get("think"))
+    aids = body.get("attachments") or []
+    if not prompt and not aids:
+        return jsonify(error="empty message"), 400
+    q, cancel = queue.Queue(), threading.Event()
+    cancels[cid] = cancel
+    history = [{"role": m["role"], "content": m["content"]} for m in t["messages"][-20:]]
+
+    images, notes, consumed = [], [], []
+    for aid in aids[:MAX_FILES]:
+        rec = staged_uploads.pop(aid, None)
+        if not rec:
+            continue
+        consumed.append(rec)
+        if rec["kind"] == "image":
+            images.append(Path(rec["path"]).read_bytes())
+        elif rec["kind"] == "video":
+            frames = video_frames(rec["path"])
+            images.extend(frames)
+            extra = "" if frames else " (frame extraction needs ffmpeg on the server)"
+            notes.append(f"[attached video: {rec['name']} ({rec['size'] // 1024} KB){extra}]")
+        else:
+            notes.append(f"[attached file: {rec['name']}]\n```\n{read_text(rec['path'])}\n```")
+    if notes:
+        prompt = "\n\n".join(notes + ([prompt] if prompt else []))
+
+    turn_maps = []
+
+    def emit(kind, payload):
+        if kind == "map":
+            turn_maps.append(payload)
+        q.put({"kind": kind, "data": payload})
+
+    def approve(cid_, name, args):
+        ev = threading.Event(); approvals[cid_] = {"event": ev, "ok": False}
+        emit("approval", {"id": cid_, "name": name, "args": args})
+        ev.wait(timeout=180)
+        return approvals.pop(cid_, {}).get("ok", False)
+
+    def work():
+        try:
+            res = viki.run(prompt, history, store.search, emit, approve, think, cancel,
+                           images=images or None, profile=user_profile.text())
+            if res["type"] != "error":
+                now = datetime.now().isoformat(timespec="seconds")
+                assistant_msg = {"role": "assistant", "content": res["content"], "time": now,
+                                 "tools": res.get("tools")}
+                if turn_maps:
+                    assistant_msg["maps"] = turn_maps
+                t["messages"] += [{"role": "user", "content": prompt, "time": now}, assistant_msg]
+            emit("done", res)
+        finally:
+            discard(consumed)
+        q.put(None)
+        try: checkpoint_thread(t)
+        except Exception: pass
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def stream():
+        while (item := q.get()) is not None:
+            yield f"data: {json.dumps(item)}\n\n"
+    return Response(stream(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/chats")
+def chats_list():
+    """List threads (main + side chats), newest first. Creates the main
+    chat on first use so the UI always has somewhere to land."""
+    chat_store.ensure_main()
+    return jsonify(chats=chat_store.list_threads())
+
+
+@app.post("/api/chats")
+def chats_create():
+    """Create a new side chat. Returns the thread."""
+    b = request.get_json(silent=True) or {}
+    t = chat_store.create(title=b.get("title", ""), kind="side")
+    t["archived"] = 0
+    threads[t["id"]] = t
+    return jsonify(chat=t)
+
+
+@app.get("/api/chats/<cid>")
+def chats_get(cid):
+    t = get_thread(cid)
+    if not t:
+        return jsonify(error="chat not found"), 404
+    return jsonify(chat=t)
+
+
+@app.delete("/api/chats/<cid>")
+def chats_delete(cid):
+    threads.pop(cid, None)
+    if not chat_store.delete(cid):
+        return jsonify(error="chat not found"), 404
+    return jsonify(ok=True)
+
+
+@app.post("/api/chats/<cid>/rename")
+def chats_rename(cid):
+    b = request.get_json(silent=True) or {}
+    t = chat_store.rename(cid, b.get("title", ""))
+    if not t:
+        return jsonify(error="chat not found"), 404
+    if cid in threads:
+        threads[cid]["title"] = t["title"]
+    return jsonify(chat=t)
+
+
+@app.route("/api/profile", methods=["GET", "POST", "DELETE"])
+def profile_api():
+    b = request.get_json(silent=True) or {}
+    if request.method == "POST":
+        user_profile.add(b.get("kind", ""), b.get("value", ""), b.get("favorite_key", ""))
+    if request.method == "DELETE":
+        user_profile.remove(b.get("kind", ""), b.get("value", ""))
+    return jsonify(profile=user_profile.as_dict())
+
+
+@app.get("/api/tasks")
+def tasks_list():
+    return jsonify(tasks=task_scheduler.list_tasks())
+
+
+@app.post("/api/tasks")
+def tasks_create():
+    """Create a recurring connection-check job from the UI. Only
+    'connection-check' is executable today, same as the agent tool."""
+    b = request.get_json(silent=True) or {}
+    try:
+        minutes = int(b["every_minutes"]) if b.get("every_minutes") not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify(error="every_minutes must be a whole number"), 400
+    try:
+        job = task_scheduler.add(b.get("name", "connection check"), b.get("kind", "daily"),
+                                 action="connection-check", every_minutes=minutes, at=b.get("at"))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(task=job)
+
+
+@app.delete("/api/tasks/<jid>")
+def tasks_delete(jid):
+    if not task_scheduler.remove(jid):
+        return jsonify(error="task not found"), 404
+    return jsonify(ok=True)
+
+
+@app.get("/api/brief")
+def brief_get():
+    return jsonify(brief=_load_brief())
+
+
+@app.post("/api/brief/refresh")
+def brief_refresh():
+    """Run a connection check right now and save it as the latest brief."""
+    data = _save_brief(connection_check())
+    return jsonify(brief=data)
+
+
 @app.post("/api/chat")
 def chat():
     body = request.get_json(force=True, silent=True) or {}
+    if body.get("chat"):
+        return chat_thread(body)
     sid = body.get("session", "default")
     prompt = (body.get("message") or "").strip()
     think = bool(body.get("think"))
@@ -272,7 +535,8 @@ def approve_route():
 
 @app.post("/api/stop")
 def stop():
-    c = cancels.get((request.get_json(force=True, silent=True) or {}).get("session", "default"))
+    b = request.get_json(force=True, silent=True) or {}
+    c = cancels.get(b.get("chat") or b.get("session", "default"))
     if c: c.set()
     return jsonify(ok=True)
 
