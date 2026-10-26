@@ -365,6 +365,13 @@ def chats_delete(cid):
     return jsonify(ok=True)
 
 
+@app.get("/api/search")
+def search_chats():
+    """Search all chat threads for a substring. Query param q."""
+    q = request.args.get("q", "")
+    return jsonify(results=chat_store.search(q))
+
+
 @app.post("/api/chats/<cid>/rename")
 def chats_rename(cid):
     b = request.get_json(silent=True) or {}

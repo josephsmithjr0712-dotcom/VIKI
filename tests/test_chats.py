@@ -69,6 +69,21 @@ class TestChatStore(unittest.TestCase):
         side = self.store.create(title="Side", kind="side")
         self.assertTrue(self.store.delete(side["id"], protect_main=True))
 
+    def test_search_finds_matches_across_threads(self):
+        t1 = self.store.create(title="Trip", kind="side")
+        t1["messages"] = [{"role": "user", "content": "Book a hotel in Killbuck"},
+                         {"role": "agent", "content": "Done, booked it"}]
+        self.store.save(t1)
+        t2 = self.store.create(title="Groceries", kind="side")
+        t2["messages"] = [{"role": "user", "content": "Buy milk in Killbuck"}]
+        self.store.save(t2)
+        hits = self.store.search("killbuck")
+        self.assertEqual(len(hits), 2)
+        self.assertEqual({h["chat_id"] for h in hits}, {t1["id"], t2["id"]})
+        self.assertIn("Killbuck", hits[0]["snippet"])
+        self.assertEqual(self.store.search(""), [])
+        self.assertEqual(self.store.search("zzz-no-such-word"), [])
+
     def test_side_chats_do_not_share_messages(self):
         a = self.store.create(title="A", kind="side")
         b = self.store.create(title="B", kind="side")

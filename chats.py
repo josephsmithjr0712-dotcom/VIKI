@@ -112,6 +112,37 @@ class ChatStore:
             })
         return out
 
+    def search(self, query, limit=20):
+        """Case-insensitive substring search across all threads.
+        Returns matches with a snippet around the hit; empty query
+        returns nothing."""
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        out = []
+        for summary in self.list_threads(limit=200):
+            thread = self.get(summary["id"])
+            if not thread:
+                continue
+            for i, m in enumerate(thread.get("messages") or []):
+                content = str(m.get("content") or "")
+                low = content.lower()
+                at = low.find(q)
+                if at < 0:
+                    continue
+                start = max(0, at - 40)
+                out.append({
+                    "chat_id": thread["id"],
+                    "title": thread.get("title", "New chat"),
+                    "kind": thread.get("kind", "side"),
+                    "index": i,
+                    "role": m.get("role", ""),
+                    "snippet": content[start:at + len(q) + 40],
+                })
+                if len(out) >= limit:
+                    return out
+        return out
+
     def rename(self, thread_id, title):
         """Rename a thread. Returns the thread, or None if it doesn't exist."""
         thread = self.get(thread_id)

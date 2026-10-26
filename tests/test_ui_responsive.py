@@ -60,6 +60,12 @@ class TestResponsiveUI(unittest.TestCase):
         self.assertIn("handsfreeOn||$('#speak').checked", self.js)
         self.assertIn("if(handsfreeOn)startListening()", self.js)
 
+    def test_history_search_wired(self):
+        self.assertIn('id="histsearch"', self.html)
+        self.assertIn("'/api/search?q='", self.js)
+        self.assertIn("function jumpToMessage", self.js)
+        self.assertIn("classList.add('found')", self.js)
+
     def test_jump_to_latest_wired(self):
         self.assertIn('id="totop"', self.html)
         self.assertIn("totop", self.css)
