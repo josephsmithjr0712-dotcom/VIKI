@@ -23,6 +23,9 @@ Environment knobs:
     VIKI_WHISPER    faster-whisper model (default tiny.en; base.en is better, slower)
     VIKI_VOICE      path to Piper .onnx voice (default voice/en_US-lessac-medium.onnx)
     VIKI_MIC        sounddevice input device index (default: system default)
+    VIKI_FOLLOWUP_SECONDS  seconds after VIKI speaks during which a quick
+                    reply is heard WITHOUT repeating the wake word
+                    (default 10; 0 disables the follow-up window)
 
 Safety: in voice mode, risky tools (sending mail, creating events, clicking
 in the browser...) are auto-denied — VIKI says so out loud instead of acting.
@@ -52,6 +55,9 @@ class VoiceConfig:
     silence_seconds: float = 1.2       # stop recording after this much silence
     max_seconds: float = 20.0          # hard cap per utterance
     wake_threshold: float = 0.5        # openwakeword score to trigger
+    followup_seconds: float = field(default_factory=lambda: float(
+        os.getenv("VIKI_FOLLOWUP_SECONDS", "10")))  # quick-reply window after
+    # VIKI speaks: speech here skips the wake word. 0 = disabled.
 
 
 # --- audio primitives (numpy-free where easy; sounddevice only at the edges) --
@@ -79,6 +85,32 @@ def record_until_silence(frames, cfg: VoiceConfig) -> bytes:
         if len(out) >= max_frames:
             break
     return b"".join(out)
+
+
+def listen_for_followup(frames, cfg: VoiceConfig) -> bytes | None:
+    """Wait up to cfg.followup_seconds for a quick reply, then record it.
+
+    Pure logic — testable without a microphone. Consumes frames until the
+    first non-silent frame, then hands the rest to record_until_silence
+    (so the reply is captured the same way as a wake-word utterance).
+    Returns the recorded audio bytes, or None if only silence arrived (or
+    the stream ended) within the window. A followup_seconds of 0 disables
+    the wait entirely and consumes nothing.
+    """
+    import itertools
+    import math
+    if cfg.followup_seconds <= 0:
+        return None
+    window = math.ceil(cfg.followup_seconds * SAMPLE_RATE / FRAME_SAMPLES)
+    it = iter(frames)
+    for _ in range(window):
+        try:
+            f = next(it)
+        except StopIteration:
+            return None
+        if _mean_abs(f) >= cfg.silence_threshold:
+            return record_until_silence(itertools.chain([f], it), cfg)
+    return None
 
 
 def write_wav(path: Path, audio: bytes, sample_rate: int = SAMPLE_RATE):
@@ -333,6 +365,16 @@ class VoiceLoop:
         finally:
             self._lamp_set("restore")  # back to however the lamp was
 
+    def _handle_audio(self, audio: bytes):
+        """Write one recorded utterance to a temp wav and handle it."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = Path(f.name)
+        try:
+            write_wav(wav_path, audio)
+            self.handle_utterance(wav_path)
+        finally:
+            wav_path.unlink(missing_ok=True)
+
     def run(self):
         self._ensure_stages()
         print(f"Listening for '{self.cfg.wakeword}' — Ctrl+C to stop.")
@@ -345,14 +387,16 @@ class VoiceLoop:
                     self._lamp_set("wake")  # purple
                     self._lamp_set("speaking")
                     self.speaker.speak("Yes, boss?")
-                    audio = record_until_silence(frames, self.cfg)
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                        wav_path = Path(f.name)
-                    try:
-                        write_wav(wav_path, audio)
-                        self.handle_utterance(wav_path)
-                    finally:
-                        wav_path.unlink(missing_ok=True)
+                    self._handle_audio(record_until_silence(frames, self.cfg))
+                    # Follow-up window: quick replies right after VIKI
+                    # speaks skip the wake word. Silence through the whole
+                    # window drops back to wake-word listening. No
+                    # "Yes, boss?" here — the conversation is already open.
+                    while self.cfg.followup_seconds > 0:
+                        followup = listen_for_followup(frames, self.cfg)
+                        if followup is None:
+                            break
+                        self._handle_audio(followup)
         except KeyboardInterrupt:
             print("\nStopped.")
 

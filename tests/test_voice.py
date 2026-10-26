@@ -54,6 +54,36 @@ class TestAudioLogic(TestCase):
             self.assertEqual(w.getnframes(), vl.FRAME_SAMPLES * 2)
 
 
+class TestListenForFollowup(TestCase):
+    def _cfg(self):
+        return replace(vl.VoiceConfig(), silence_seconds=0.24,
+                       followup_seconds=0.24, max_seconds=30)  # 3-frame window
+
+    def test_speech_in_window_is_recorded(self):
+        frames = [frame(8000)] * 2 + [frame(0)] * 20
+        audio = vl.listen_for_followup(iter(frames), self._cfg())
+        # 2 loud + 3 silent tail frames, then stop
+        self.assertEqual(len(audio), (2 + 3) * vl.FRAME_SAMPLES * 2)
+
+    def test_silence_through_window_returns_none(self):
+        frames = [frame(0)] * 50
+        self.assertIsNone(vl.listen_for_followup(iter(frames), self._cfg()))
+
+    def test_stream_ending_in_window_returns_none(self):
+        self.assertIsNone(vl.listen_for_followup(iter([frame(0)]), self._cfg()))
+
+    def test_disabled_window_consumes_nothing(self):
+        class Exploding:
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                raise AssertionError("disabled window must not read frames")
+
+        cfg = replace(vl.VoiceConfig(), followup_seconds=0)
+        self.assertIsNone(vl.listen_for_followup(Exploding(), cfg))
+
+
 class TestVoicePolicy(TestCase):
     def test_voice_mode_never_approves(self):
         self.assertFalse(vl.voice_approve("c1", "gmail_send", {}))
@@ -94,6 +124,62 @@ class TestVoiceLoopOrchestration(TestCase):
         self.assertEqual(calls, [("agent", "what time is it"), ("speak", "It is noon.")])
         # conversation history kept for follow-ups
         self.assertEqual(len(loop._history), 2)
+
+    def _run_loop(self, frames, texts):
+        """Drive VoiceLoop.run() with fakes; the frame stream ends by raising
+        KeyboardInterrupt, which run() catches as a clean stop."""
+        cfg = replace(vl.VoiceConfig(), silence_seconds=0.24,
+                      followup_seconds=0.24, max_seconds=30)
+
+        def mic_frames():
+            yield from frames
+            raise KeyboardInterrupt
+
+        mic = MagicMock()
+        mic.frames.return_value = mic_frames()
+        heard = {"n": 0}
+
+        def heard_fn(frame):
+            heard["n"] += 1
+            return heard["n"] == 1  # wake word only on the first frame
+
+        wake = MagicMock()
+        wake.heard.side_effect = heard_fn
+        transcriber = MagicMock()
+        transcriber.transcribe.side_effect = list(texts)
+        spoken = []
+        speaker = MagicMock()
+        speaker.speak.side_effect = lambda t: spoken.append(t)
+        agent_texts = []
+
+        def agent_runner(text):
+            agent_texts.append(text)
+            return "reply to: " + text
+
+        loop = vl.VoiceLoop(cfg=cfg, mic=mic, wake=wake, transcriber=transcriber,
+                            speaker=speaker, agent_runner=agent_runner, lamp=False)
+        loop.run()
+        return agent_texts, spoken
+
+    def test_run_followup_reply_skips_wake_word(self):
+        loud, silent = frame(8000), frame(0)
+        frames = ([loud]  # wake frame
+                  + [loud] * 3 + [silent] * 3  # first utterance
+                  + [loud] * 2 + [silent] * 3  # follow-up reply
+                  + [silent] * 3)  # silence through the next window
+        agent_texts, spoken = self._run_loop(frames, ["first", "second"])
+        self.assertEqual(agent_texts, ["first", "second"])
+        # "Yes, boss?" once only — the follow-up did not re-prompt it
+        self.assertEqual(spoken, ["Yes, boss?", "reply to: first", "reply to: second"])
+
+    def test_run_silence_through_window_returns_to_wake(self):
+        loud, silent = frame(8000), frame(0)
+        frames = ([loud]  # wake frame
+                  + [loud] * 3 + [silent] * 3  # first utterance
+                  + [silent] * 3)  # silence through the follow-up window
+        agent_texts, spoken = self._run_loop(frames, ["first"])
+        self.assertEqual(agent_texts, ["first"])
+        self.assertEqual(spoken, ["Yes, boss?", "reply to: first"])
 
     def test_empty_transcript_says_nothing(self):
         transcriber = MagicMock()
