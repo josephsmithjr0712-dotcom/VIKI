@@ -61,6 +61,24 @@ class TestUserProfile(unittest.TestCase):
         self.assertEqual(len(added), 2)
         self.assertIn("black coffee", self.p.text())
 
+    def test_import_negated_likes_become_dislikes(self):
+        # Negated preferences contain the word "like" ("doesn't like"), so
+        # they must not be misfiled as likes.
+        added = self.p.import_from_facts([
+            "User doesn't like cilantro.",
+            "User does not like mushrooms.",
+            "User don't like olives.",
+            "User is not a fan of anchovies.",
+            "User loves jazz.",
+        ])
+        kinds = [k for k, _ in added]
+        self.assertEqual(kinds.count("dislike"), 4)
+        self.assertEqual(kinds.count("like"), 1)
+        d = self.p.as_dict()
+        for food in ("cilantro", "mushrooms", "olives", "anchovies"):
+            self.assertTrue(any(food in v for v in d["dislikes"]), food)
+        self.assertTrue(any("jazz" in v for v in d["likes"]))
+
     def test_corrupt_file_starts_fresh(self):
         Path(self.tmp, "profile.json").write_text("{not json", encoding="utf-8")
         p = UserProfile(folder=self.tmp)

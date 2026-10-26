@@ -26,9 +26,12 @@ MAX_FAVORITES = 30
 # Phrases in a memory fact that signal a profile entry. Checked in order;
 # the first matching kind wins. Kept deliberately narrow so ordinary facts
 # ("User works at Walmart") never become profile entries.
+# Dislike is checked BEFORE like on purpose: a negated preference such as
+# "User doesn't like cilantro" contains the word "like", so checking like
+# first misfiled every negated like as a like.
 _PROFILE_PATTERNS = (
+    ("dislike", re.compile(r"\b(dislikes?|hates?|can't stand|doesn'?t like|don'?t like|does not like|do not like|not a fan of)\b", re.I)),
     ("like", re.compile(r"\b(likes?|loves?|enjoys?|prefers?|is a fan of|into)\b", re.I)),
-    ("dislike", re.compile(r"\b(dislikes?|hates?|can't stand|doesn'?t like|not a fan of)\b", re.I)),
     ("hobby", re.compile(r"\b(hobby|hobbies|plays?|collects?)\b", re.I)),
 )
 
