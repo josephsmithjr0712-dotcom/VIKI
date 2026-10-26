@@ -298,5 +298,84 @@ class TestMapPayload(unittest.TestCase):
         self.assertIn("map card", out)
 
 
+class TestTrafficAdjustedDuration(unittest.TestCase):
+    def test_no_traffic_returns_none(self):
+        with patch.object(maps, "traffic_segments", return_value=None):
+            self.assertIsNone(maps.traffic_adjusted_duration([], 1500))
+
+    def test_free_flow_returns_none(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 1.0, "closed": False}]
+        with patch.object(maps, "traffic_segments", return_value=segs):
+            self.assertIsNone(maps.traffic_adjusted_duration([], 1500))
+
+    def test_slow_traffic_scales_duration(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 0.5, "closed": False}]
+        with patch.object(maps, "traffic_segments", return_value=segs):
+            self.assertEqual(maps.traffic_adjusted_duration([], 1500), 3000)
+
+    def test_closed_segments_ignored(self):
+        segs = [
+            {"lat": 40.0, "lon": -81.9, "ratio": 0.0, "closed": True},
+            {"lat": 40.1, "lon": -81.8, "ratio": 0.5, "closed": False},
+        ]
+        with patch.object(maps, "traffic_segments", return_value=segs):
+            self.assertEqual(maps.traffic_adjusted_duration([], 1500), 3000)
+
+    def test_all_closed_returns_none(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 0.0, "closed": True}]
+        with patch.object(maps, "traffic_segments", return_value=segs):
+            self.assertIsNone(maps.traffic_adjusted_duration([], 1500))
+
+    def test_ratio_floor_caps_at_4x(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 0.1, "closed": False}]
+        with patch.object(maps, "traffic_segments", return_value=segs):
+            self.assertEqual(maps.traffic_adjusted_duration([], 1500), 6000)
+
+    def test_distance_text_shows_adjusted_time(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 0.5, "closed": False}]
+        with patch.object(maps, "_http_get_json") as mock_get, patch.object(
+            maps, "traffic_segments", return_value=segs
+        ):
+            mock_get.side_effect = [
+                _nominatim(40.0, -81.9, "Start"),
+                _nominatim(40.5, -81.7, "End"),
+                _OSRM,
+            ]
+            out = maps.maps_distance("A", "B")
+        self.assertIn("about 50 min drive with current traffic", out)
+        self.assertIn("25 min free flow", out)
+
+    def test_distance_text_free_flow_unchanged(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 1.0, "closed": False}]
+        with patch.object(maps, "_http_get_json") as mock_get, patch.object(
+            maps, "traffic_segments", return_value=segs
+        ):
+            mock_get.side_effect = [
+                _nominatim(40.0, -81.9, "Start"),
+                _nominatim(40.5, -81.7, "End"),
+                _OSRM,
+            ]
+            out = maps.maps_distance("A", "B")
+        self.assertIn("about 25 min drive", out)
+        self.assertNotIn("current traffic", out)
+
+    def test_directions_header_shows_adjusted_time(self):
+        segs = [{"lat": 40.0, "lon": -81.9, "ratio": 0.5, "closed": False}]
+        with patch.object(maps, "_http_get_json") as mock_get, patch.object(
+            maps, "_http_post"
+        ) as mock_post, patch.object(
+            maps, "traffic_segments", return_value=segs
+        ):
+            mock_get.side_effect = [
+                _nominatim(40.0, -81.9, "Start"),
+                _nominatim(40.5, -81.7, "End"),
+                _OSRM,
+            ]
+            mock_post.return_value = _OVERPASS
+            out = maps.maps_directions("A", "B")
+        self.assertIn("about 50 min with current traffic", out)
+        self.assertIn("25 min free flow", out)
+
+
 if __name__ == "__main__":
     unittest.main()

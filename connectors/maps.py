@@ -356,6 +356,32 @@ def traffic_segments(coords):
     return segments or None
 
 
+def traffic_adjusted_duration(coords, duration_s):
+    """Traffic-adjusted drive time for a route, or None.
+
+    Averages the sampled TomTom ratios from traffic_segments()
+    (ratio = current/free-flow speed; below 1 means slower than free
+    flow) and scales the free-flow duration: adjusted =
+    duration_s / mean_ratio. Returns None when traffic is unavailable
+    (no key, no usable samples, every sample a closure) or when
+    traffic is essentially free-flowing (mean ratio >= 0.98) — callers
+    then just report the free-flow time. Ratios are floored at 0.25
+    as a sanity cap so one bad sample can't inflate the estimate past
+    4x free flow. Never raises, never fakes.
+    """
+    segments = traffic_segments(coords)
+    if not segments:
+        return None
+    ratios = [s["ratio"] for s in segments
+              if not s.get("closed") and s["ratio"] > 0]
+    if not ratios:
+        return None
+    mean_ratio = sum(ratios) / len(ratios)
+    if mean_ratio >= 0.98:
+        return None
+    return duration_s / max(mean_ratio, 0.25)
+
+
 # --- map-card payload ------------------------------------------------------
 
 def _simplify(coords, max_points=MAP_MAX_POINTS):
@@ -407,25 +433,46 @@ def take_map_payload(origin, destination):
 # --- agent tools (plain-language strings) ----------------------------------
 
 def maps_distance(origin, destination):
-    """Distance and drive time from one place to another."""
+    """Distance and drive time from one place to another.
+
+    The drive time is traffic-adjusted when a TomTom key is set (see
+    traffic_adjusted_duration); without one it stays the free-flow time.
+    """
     r, err = route(origin, destination)
     if err:
         return err
+    adjusted = traffic_adjusted_duration(r["coords"], r["duration_s"])
+    if adjusted:
+        time_txt = (f"about {_fmt_minutes(adjusted)} drive with current "
+                    f"traffic ({_fmt_minutes(r['duration_s'])} free flow)")
+    else:
+        time_txt = f"about {_fmt_minutes(r['duration_s'])} drive"
     return (
         f"{origin} to {destination}: {_fmt_miles(r['distance_m'])} "
-        f"(about {_fmt_minutes(r['duration_s'])} drive)."
+        f"({time_txt})."
     )
 
 
 def maps_directions(origin, destination):
-    """Turn-by-turn directions, plus construction on the route."""
+    """Turn-by-turn directions, plus construction on the route.
+
+    The header drive time is traffic-adjusted when a TomTom key is set
+    (see traffic_adjusted_duration); without one it stays free-flow.
+    """
     r, err = route(origin, destination)
     if err:
         return err
-    lines = [
-        f"Route: {origin} to {destination} — "
-        f"{_fmt_miles(r['distance_m'])}, about {_fmt_minutes(r['duration_s'])}.",
-    ]
+    adjusted = traffic_adjusted_duration(r["coords"], r["duration_s"])
+    if adjusted:
+        header = (f"Route: {origin} to {destination} — "
+                  f"{_fmt_miles(r['distance_m'])}, about "
+                  f"{_fmt_minutes(adjusted)} with current traffic "
+                  f"({_fmt_minutes(r['duration_s'])} free flow).")
+    else:
+        header = (f"Route: {origin} to {destination} — "
+                  f"{_fmt_miles(r['distance_m'])}, about "
+                  f"{_fmt_minutes(r['duration_s'])}.")
+    lines = [header]
     for i, step in enumerate(r["steps"], 1):
         lines.append(f"{i}. {step}")
     if not r["steps"]:
