@@ -16,6 +16,7 @@ from announcements import AnnouncementLog  # noqa: E402
 from smart_announce import (  # noqa: E402
     WELCOME_HOME_TEXT,
     announce_brief,
+    announce_followup_nudges,
     announce_if_home,
     announce_urgent_emails,
     is_urgent,
@@ -266,6 +267,46 @@ class SmartAnnounceTest(unittest.TestCase):
                                                 log=self.log,
                                                 states=_home_states()),
                          "no urgent emails")
+
+    def test_announce_followup_nudges_speaks_each_thread(self):
+        speaker = _Speaker()
+        threads = [
+            {"from": "boss@example.com", "subject": "Q?"},
+            {"from": "HR Team <hr@gerresheimer.com>", "subject": ""},
+        ]
+        out = announce_followup_nudges(threads, announce_fn=speaker,
+                                       log=self.log, states=_home_states())
+        self.assertEqual(out, "follow-up nudges: 2 announced")
+        self.assertEqual(len(speaker.calls), 2)
+        self.assertIn("boss@example.com", speaker.calls[0])
+        self.assertIn("Q?", speaker.calls[0])
+        self.assertIn("(no subject)", speaker.calls[1])
+
+    def test_announce_followup_nudges_never_repeats(self):
+        speaker = _Speaker()
+        threads = [{"from": "a@b.com", "subject": "Hello"}]
+        announce_followup_nudges(threads, announce_fn=speaker,
+                                 log=self.log, states=_home_states())
+        out = announce_followup_nudges(threads, announce_fn=speaker,
+                                       log=self.log, states=_home_states())
+        self.assertIn("0 announced", out)
+        self.assertIn("already announced", out)
+        self.assertEqual(len(speaker.calls), 1)
+
+    def test_announce_followup_nudges_empty(self):
+        self.assertEqual(announce_followup_nudges(
+            [], announce_fn=_Speaker(), log=self.log,
+            states=_home_states()), "no follow-up nudges")
+
+    def test_announce_followup_nudges_skips_when_away(self):
+        speaker = _Speaker()
+        states = [_tracker("not_home"), _light("on")]
+        out = announce_followup_nudges(
+            [{"from": "a@b.com", "subject": "Hi"}], announce_fn=speaker,
+            log=self.log, states=states)
+        self.assertIn("0 announced", out)
+        self.assertIn("phone not home", out)
+        self.assertEqual(speaker.calls, [])
 
 
 if __name__ == "__main__":

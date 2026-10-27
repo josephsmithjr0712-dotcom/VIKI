@@ -424,7 +424,11 @@ class ServerContractTest(unittest.TestCase):
 
         orig_token = True
         orig_threads = _g.gmail_unanswered_threads
+        import smart_announce as _sa
+
+        orig_announce = _sa.announce_followup_nudges
         try:
+            _sa.announce_followup_nudges = lambda ts: "follow-up nudges: 2 announced"
             _g.token_exists = lambda: token
             if search_error:
                 def _boom(*_a, **_k):
@@ -436,6 +440,7 @@ class ServerContractTest(unittest.TestCase):
         finally:
             _g.token_exists = orig_token
             _g.gmail_unanswered_threads = orig_threads
+            _sa.announce_followup_nudges = orig_announce
 
     def test_nudge_job_lists_unanswered_threads(self):
         result = self._run_nudge_job(threads=[
@@ -444,7 +449,7 @@ class ServerContractTest(unittest.TestCase):
         self.assertEqual(
             result,
             "follow-up-nudges: 2 awaiting a reply: Q? (boss@example.com), "
-            "(no subject) (c@d.com)")
+            "(no subject) (c@d.com); follow-up nudges: 2 announced")
 
     def test_nudge_job_none_awaiting(self):
         result = self._run_nudge_job(threads=[])
@@ -457,6 +462,31 @@ class ServerContractTest(unittest.TestCase):
     def test_nudge_job_search_failure_is_recorded(self):
         result = self._run_nudge_job(search_error=True)
         self.assertIn("follow-up-nudges failed", result)
+
+    def test_nudge_job_announcement_failure_is_recorded(self):
+        import connectors.google as _g
+        import smart_announce as _sa
+
+        orig_token = _g.token_exists
+        orig_threads = _g.gmail_unanswered_threads
+        orig_announce = _sa.announce_followup_nudges
+        try:
+            _g.token_exists = lambda: True
+            _g.gmail_unanswered_threads = lambda *a, **k: [
+                {"subject": "Q?", "from": "a@b.com"}]
+
+            def _boom(*_a, **_k):
+                raise RuntimeError("speaker down")
+
+            _sa.announce_followup_nudges = _boom
+            result = server_mod._run_connection_job(
+                {"action": "follow-up-nudges"})
+        finally:
+            _g.token_exists = orig_token
+            _g.gmail_unanswered_threads = orig_threads
+            _sa.announce_followup_nudges = orig_announce
+        self.assertIn("follow-up-nudges: 1 awaiting a reply", result)
+        self.assertIn("announcement failed: RuntimeError", result)
 
     def test_tasks_create_accepts_nudge_action(self):
         client, r = self._login()

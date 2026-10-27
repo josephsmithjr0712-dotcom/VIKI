@@ -279,3 +279,36 @@ def announce_urgent_emails(messages, announce_fn=None, log=None, states=None,
     if skipped:
         summary += f", {len(skipped)} skipped ({', '.join(sorted(set(skipped)))})"
     return summary
+
+
+def announce_followup_nudges(threads, announce_fn=None, log=None, states=None,
+                             ping=None, phone_ip=None):
+    """Speak each unanswered thread once, if Joey is home.
+
+    The follow-up-nudges job (v0.3.11) only listed threads on the job
+    result; this second slice speaks them, mirroring
+    announce_urgent_emails: one line per thread through announce_if_home,
+    so the usual gates apply (phone home + lights on, never repeated,
+    failures not recorded). Returns a short summary string for the
+    scheduler job's record, e.g. "follow-up nudges: 2 announced" or
+    "no follow-up nudges".
+    """
+    threads = [t for t in (threads or []) if t]
+    if not threads:
+        return "no follow-up nudges"
+    spoken, skipped = 0, []
+    for thread in threads:
+        sender = str(thread.get("from") or "someone").split("<")[0].strip() or "someone"
+        subject = str(thread.get("subject") or "(no subject)").strip()
+        ok, reason = announce_if_home(
+            f"You still owe a reply to {sender} about {subject}.",
+            announce_fn=announce_fn, log=log, states=states, ping=ping,
+            phone_ip=phone_ip)
+        if ok:
+            spoken += 1
+        else:
+            skipped.append(reason)
+    summary = f"follow-up nudges: {spoken} announced"
+    if skipped:
+        summary += f", {len(skipped)} skipped ({', '.join(sorted(set(skipped)))})"
+    return summary

@@ -189,7 +189,18 @@ def _run_connection_job(job):
             return "follow-up-nudges: nothing awaiting a reply"
         lines = ", ".join(
             f"{t['subject'] or '(no subject)'} ({t['from']})" for t in threads)
-        return f"follow-up-nudges: {len(threads)} awaiting a reply: {lines}"
+        listed = f"follow-up-nudges: {len(threads)} awaiting a reply: {lines}"
+        # Follow-up nudges, second slice (v0.3.12): speak the threads
+        # too, through the same presence-gated, never-repeated path as
+        # urgent-email announcements. Speaking is best-effort: a
+        # failure is recorded on the result, never raised.
+        try:
+            from smart_announce import announce_followup_nudges
+
+            return listed + "; " + announce_followup_nudges(threads)
+        except Exception as exc:  # noqa: BLE001 - recorded, not raised
+            return (listed + "; follow-up-nudges announcement failed: "
+                    + type(exc).__name__)
     if job.get("action") == "urgent-email-check":
         # Urgent-email smart announcements (v0.3.10): yesterday's mail
         # is not worth waking the house for, so only the last day's
