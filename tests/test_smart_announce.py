@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -62,8 +63,15 @@ class SmartAnnounceTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.log = AnnouncementLog(Path(self._tmp.name) / "announced.json")
+        # v0.3.14: quiet hours default to real time, which would make
+        # these speaking-expectation tests fail on night runs. Pin the
+        # guard off here; test_quiet_hours.py covers it explicitly.
+        self._quiet_off = mock.patch(
+            "smart_announce.is_quiet_hours", return_value=False)
+        self._quiet_off.start()
 
     def tearDown(self):
+        self._quiet_off.stop()
         self._tmp.cleanup()
 
     # -- announce_if_home -------------------------------------------------

@@ -20,6 +20,10 @@ reads as "don't speak", never as a guess):
 - The welcome-home greeting fires at most once per day, weekdays
   after 3pm, and only when he's home.
 - A failed announcement is never recorded, so it can be retried.
+- Quiet hours (v0.3.14): no proactive announcement speaks between
+  10pm and 7am — a skipped announcement is never recorded, so it can
+  speak later. Override with VIKI_QUIET_HOURS="22-7" (any "start-end"
+  hour pair, overnight wrap allowed); "off" disables the guard.
 
 All I/O is injectable (``announce_fn``, ``log``, ``states``,
 ``ping``), so the whole module is testable with no network, no Home
@@ -30,6 +34,7 @@ convention) — anything else counts as a failure and is not recorded.
 """
 
 import os
+from datetime import datetime
 
 try:
     from announcements import AnnouncementLog
@@ -43,6 +48,52 @@ except Exception:  # pragma: no cover - import-path fallback
     welcome_home_check = None
 
 WELCOME_HOME_TEXT = "Welcome home, boss."
+
+# Quiet hours (v0.3.14): default 10pm–7am, matching Joey's 7am shift
+# start. VIKI_QUIET_HOURS="start-end" overrides (e.g. "21-6");
+# "off" disables the guard entirely.
+DEFAULT_QUIET_START_HOUR = 22
+DEFAULT_QUIET_END_HOUR = 7
+
+
+def _quiet_hours():
+    """(start, end) quiet-hour pair from env, or None if disabled.
+
+    Malformed values fall back to the default window rather than
+    silently disabling the guard — a typo should not wake the house.
+    A start equal to the end means an empty window (disabled).
+    """
+    raw = os.getenv("VIKI_QUIET_HOURS", "").strip().lower()
+    if raw in ("off", "none", "disabled"):
+        return None
+    if not raw:
+        return (DEFAULT_QUIET_START_HOUR, DEFAULT_QUIET_END_HOUR)
+    try:
+        start_s, end_s = raw.split("-", 1)
+        start, end = int(start_s.strip()), int(end_s.strip())
+    except ValueError:
+        return (DEFAULT_QUIET_START_HOUR, DEFAULT_QUIET_END_HOUR)
+    if not (0 <= start <= 23 and 0 <= end <= 23):
+        return (DEFAULT_QUIET_START_HOUR, DEFAULT_QUIET_END_HOUR)
+    if start == end:
+        return None
+    return (start, end)
+
+
+def is_quiet_hours(now=None):
+    """True if ``now`` (default: right now) falls in quiet hours.
+
+    The window wraps midnight when start > end (22–7 means 22:00
+    through 06:59); otherwise it is a plain [start, end) range.
+    """
+    window = _quiet_hours()
+    if window is None:
+        return False
+    start, end = window
+    hour = (now or datetime.now()).hour
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
 
 # Scheduler job actions understood by run_smart_job.
 WELCOME_HOME_ACTION = "welcome-home"
@@ -80,14 +131,17 @@ def _get_log(log):
 
 
 def announce_if_home(text, announce_fn=None, log=None, states=None,
-                     ping=None, phone_ip=None):
+                     ping=None, phone_ip=None, now=None):
     """Speak ``text`` only if Joey is home and it wasn't said before.
 
     Returns (True, result) on a spoken announcement, or (False, reason)
     when skipped or failed. Reasons: "nothing to announce",
     "presence unavailable", "phone not home", "lights off",
-    "already announced", "announce failed: ...", or the speaker's
-    failure string. A failure is never recorded, so it can be retried.
+    "quiet hours", "already announced", "announce failed: ...", or
+    the speaker's failure string. A failure — and a quiet-hours skip
+    — is never recorded, so it can be retried (and spoken later).
+    ``now`` defaults to right now; callers that need a deterministic
+    check (tests, the scheduler) pass it explicitly.
     """
     text = (text or "").strip()
     if not text:
@@ -102,6 +156,8 @@ def announce_if_home(text, announce_fn=None, log=None, states=None,
         return False, "phone not home"
     if not status.get("lights_on"):
         return False, "lights off"
+    if is_quiet_hours(now=now):
+        return False, "quiet hours"
     log_obj = _get_log(log)
     if log_obj is not None and log_obj.already_announced(text):
         return False, "already announced"
@@ -121,7 +177,7 @@ def announce_if_home(text, announce_fn=None, log=None, states=None,
 
 
 def announce_brief(brief, announce_fn=None, log=None, states=None,
-                   ping=None, phone_ip=None):
+                   ping=None, phone_ip=None, now=None):
     """Speak a scheduled connection-check brief, if Joey is home.
 
     This is the morning-brief path: a scheduled connection-check job
@@ -140,7 +196,8 @@ def announce_brief(brief, announce_fn=None, log=None, states=None,
         return False, "nothing to announce"
     spoken = "Here's your brief. " + text
     return announce_if_home(spoken, announce_fn=announce_fn, log=log,
-                            states=states, ping=ping, phone_ip=phone_ip)
+                            states=states, ping=ping, phone_ip=phone_ip,
+                            now=now)
 
 
 def welcome_home(announce_fn=None, log=None, now=None, states=None,
@@ -163,6 +220,10 @@ def welcome_home(announce_fn=None, log=None, now=None, states=None,
         return False, "presence unavailable"
     if not due:
         return False, reason
+    if is_quiet_hours(now=now):
+        # Quiet hours do NOT burn the day's greeting: it can still
+        # speak later (the due check re-runs on the next tick).
+        return False, "quiet hours"
     fn = announce_fn or _default_announce
     try:
         result = fn(WELCOME_HOME_TEXT)
@@ -199,7 +260,7 @@ def run_smart_job(job, announce_fn=None, log=None, now=None,
         text = action[len(ANNOUNCE_ACTION_PREFIX):].strip()
         ok, reason = announce_if_home(text, announce_fn=announce_fn,
                                       log=log, states=states, ping=ping,
-                                      phone_ip=phone_ip)
+                                      phone_ip=phone_ip, now=now)
         return f"announce-if-home: {'spoken' if ok else reason}"
     return f"unknown smart-announcement job: {action!r}"
 
@@ -250,7 +311,7 @@ def is_urgent(message, senders=None, keywords=None):
 
 def announce_urgent_emails(messages, announce_fn=None, log=None, states=None,
                            ping=None, phone_ip=None, senders=None,
-                           keywords=None):
+                           keywords=None, now=None):
     """Speak each urgent message in ``messages`` once, if Joey is home.
 
     Non-urgent messages are silently skipped. Each spoken line goes
@@ -270,7 +331,7 @@ def announce_urgent_emails(messages, announce_fn=None, log=None, states=None,
         ok, reason = announce_if_home(
             f"Urgent email from {sender}: {subject}.",
             announce_fn=announce_fn, log=log, states=states, ping=ping,
-            phone_ip=phone_ip)
+            phone_ip=phone_ip, now=now)
         if ok:
             spoken += 1
         else:
@@ -282,7 +343,7 @@ def announce_urgent_emails(messages, announce_fn=None, log=None, states=None,
 
 
 def announce_followup_nudges(threads, announce_fn=None, log=None, states=None,
-                             ping=None, phone_ip=None):
+                             ping=None, phone_ip=None, now=None):
     """Speak each unanswered thread once, if Joey is home.
 
     The follow-up-nudges job (v0.3.11) only listed threads on the job
@@ -303,7 +364,7 @@ def announce_followup_nudges(threads, announce_fn=None, log=None, states=None,
         ok, reason = announce_if_home(
             f"You still owe a reply to {sender} about {subject}.",
             announce_fn=announce_fn, log=log, states=states, ping=ping,
-            phone_ip=phone_ip)
+            phone_ip=phone_ip, now=now)
         if ok:
             spoken += 1
         else:
