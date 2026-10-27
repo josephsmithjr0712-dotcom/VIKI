@@ -418,6 +418,58 @@ class ServerContractTest(unittest.TestCase):
         result = self._run_urgent_job(search_error=True)
         self.assertIn("urgent-email-check failed", result)
 
+    # --- follow-up-nudges jobs (v0.3.11) -------------------------------
+    def _run_nudge_job(self, token=True, threads=None, search_error=False):
+        import connectors.google as _g
+
+        orig_token = True
+        orig_threads = _g.gmail_unanswered_threads
+        try:
+            _g.token_exists = lambda: token
+            if search_error:
+                def _boom(*_a, **_k):
+                    raise RuntimeError("boom")
+                _g.gmail_unanswered_threads = _boom
+            else:
+                _g.gmail_unanswered_threads = lambda *a, **k: threads or []
+            return server_mod._run_connection_job({"action": "follow-up-nudges"})
+        finally:
+            _g.token_exists = orig_token
+            _g.gmail_unanswered_threads = orig_threads
+
+    def test_nudge_job_lists_unanswered_threads(self):
+        result = self._run_nudge_job(threads=[
+            {"subject": "Q?", "from": "boss@example.com"},
+            {"subject": "", "from": "c@d.com"}])
+        self.assertEqual(
+            result,
+            "follow-up-nudges: 2 awaiting a reply: Q? (boss@example.com), "
+            "(no subject) (c@d.com)")
+
+    def test_nudge_job_none_awaiting(self):
+        result = self._run_nudge_job(threads=[])
+        self.assertEqual(result, "follow-up-nudges: nothing awaiting a reply")
+
+    def test_nudge_job_without_google_records_not_connected(self):
+        result = self._run_nudge_job(token=False)
+        self.assertEqual(result, "follow-up-nudges: Google not connected")
+
+    def test_nudge_job_search_failure_is_recorded(self):
+        result = self._run_nudge_job(search_error=True)
+        self.assertIn("follow-up-nudges failed", result)
+
+    def test_tasks_create_accepts_nudge_action(self):
+        client, r = self._login()
+        self.assertEqual(r.status_code, 200)
+        r = client.post("/api/tasks", json={
+            "name": "nudges", "kind": "interval", "every_minutes": 60,
+            "action": "follow-up-nudges"})
+        self.assertEqual(r.status_code, 200)
+        r = client.post("/api/tasks", json={
+            "name": "bad", "kind": "interval", "every_minutes": 60,
+            "action": "nonsense"})
+        self.assertEqual(r.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

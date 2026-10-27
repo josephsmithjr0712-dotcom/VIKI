@@ -92,6 +92,59 @@ class TestGmail(TestCase):
         self.assertIn("Hi", raw)
 
 
+    # --- unanswered threads (v0.3.11) ---------------------------------
+    def _thread(self, newest_labels, frm="a@b.com", subject="Hi",
+                date="Mon, 26 Oct 2026", snippet="snip"):
+        return {"messages": [
+            {"labelIds": ["INBOX"], "snippet": "older",
+             "payload": {"headers": [
+                 {"name": "From", "value": "other@c.com"},
+                 {"name": "Subject", "value": "Old"},
+                 {"name": "Date", "value": "Sun, 25 Oct 2026"}]}},
+            {"labelIds": newest_labels, "snippet": snippet,
+             "payload": {"headers": [
+                 {"name": "From", "value": frm},
+                 {"name": "Subject", "value": subject},
+                 {"name": "Date", "value": date}]}},
+        ]}
+
+    def test_unanswered_threads_skips_thread_joey_replied_to(self):
+        svc = MagicMock()
+        svc.users().threads().list().execute.return_value = {
+            "threads": [{"id": "t1"}, {"id": "t2"}]}
+        svc.users().threads().get().execute.side_effect = [
+            self._thread(["SENT"]),  # Joey replied last: skipped
+            self._thread(["INBOX"], frm="boss@example.com", subject="Q?"),
+        ]
+        with patch.object(g, "_service", return_value=svc):
+            out = g.gmail_unanswered_threads(older_than_days=2)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["thread_id"], "t2")
+        self.assertEqual(out[0]["from"], "boss@example.com")
+        self.assertEqual(out[0]["subject"], "Q?")
+
+    def test_unanswered_threads_no_threads_is_empty_list(self):
+        svc = MagicMock()
+        svc.users().threads().list().execute.return_value = {}
+        with patch.object(g, "_service", return_value=svc):
+            self.assertEqual(g.gmail_unanswered_threads(), [])
+
+    def test_unanswered_threads_empty_thread_skipped(self):
+        svc = MagicMock()
+        svc.users().threads().list().execute.return_value = {
+            "threads": [{"id": "t1"}]}
+        svc.users().threads().get().execute.return_value = {"messages": []}
+        with patch.object(g, "_service", return_value=svc):
+            self.assertEqual(g.gmail_unanswered_threads(), [])
+
+    def test_unanswered_threads_list_failure_raises(self):
+        svc = MagicMock()
+        svc.users().threads().list().execute.side_effect = RuntimeError("down")
+        with patch.object(g, "_service", return_value=svc):
+            with self.assertRaises(RuntimeError):
+                g.gmail_unanswered_threads()
+
+
 class TestCalendar(TestCase):
     def test_list_formats_events(self):
         svc = MagicMock()

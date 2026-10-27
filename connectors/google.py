@@ -134,6 +134,56 @@ def gmail_search_structured(query, max_results=10):
     return out
 
 
+def gmail_unanswered_threads(older_than_days=2, max_threads=10):
+    """Find inbox threads where Joey still owes the reply.
+
+    A thread counts as unanswered when its newest message is NOT one
+    Joey sent (i.e. it carries no SENT label): if he had replied last,
+    the thread's newest message would be his. Threads whose newest
+    message is his own reply, or that fail to fetch, are skipped.
+
+    Returns a list of dicts with keys thread_id, from, subject, date,
+    snippet. No threads -> []. A failed thread-list call raises
+    RuntimeError so a caller can tell "search failed" apart from
+    "nothing awaiting a reply", matching gmail_search_structured.
+    """
+    svc = _service("gmail", "v1")
+    try:
+        resp = (
+            svc.users().threads().list(
+                userId="me", q=f"in:inbox older_than:{int(older_than_days)}d",
+                maxResults=int(max_threads)).execute()
+        )
+    except Exception as e:
+        raise RuntimeError(f"Gmail thread search failed: {e}")
+    out = []
+    for t in resp.get("threads", []):
+        try:
+            full = (
+                svc.users().threads().get(
+                    userId="me", id=t["id"], format="metadata",
+                    metadataHeaders=["From", "Subject", "Date"]).execute()
+            )
+        except Exception:  # noqa: BLE001 - one bad thread must not kill the batch
+            continue
+        messages = full.get("messages", [])
+        if not messages:
+            continue
+        newest = messages[-1]
+        if "SENT" in (newest.get("labelIds") or []):
+            continue  # Joey replied last; nothing owed here
+        hdr = {h["name"]: h["value"]
+               for h in newest.get("payload", {}).get("headers", [])}
+        out.append({
+            "thread_id": t["id"],
+            "from": hdr.get("From", ""),
+            "subject": hdr.get("Subject", ""),
+            "date": hdr.get("Date", ""),
+            "snippet": newest.get("snippet", ""),
+        })
+    return out
+
+
 def _body_from_payload(payload) -> str:
     """Extract readable text from a Gmail message payload (recursive)."""
     mime = payload.get("mimeType", "")

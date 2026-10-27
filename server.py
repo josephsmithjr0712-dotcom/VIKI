@@ -167,9 +167,29 @@ def _save_brief(text):
 
 
 def _run_connection_job(job):
-    """Executor for scheduled jobs. 'connection-check' and
-    'urgent-email-check' run on their own today; anything else is
-    recorded, not silently dropped."""
+    """Executor for scheduled jobs. 'connection-check',
+    'urgent-email-check', and 'follow-up-nudges' run on their own
+    today; anything else is recorded, not silently dropped."""
+    if job.get("action") == "follow-up-nudges":
+        # Follow-up nudges (v0.3.11): inbox threads older than 2 days
+        # whose newest message is not Joey's own reply get listed on
+        # the job result, so he can see what he still owes a reply to.
+        # A missing Google connection or a failed search is recorded,
+        # never raised into the tick loop.
+        try:
+            from connectors import google as google_mod
+
+            if not google_mod.token_exists():
+                return "follow-up-nudges: Google not connected"
+            threads = google_mod.gmail_unanswered_threads(
+                older_than_days=2, max_threads=10)
+        except Exception as exc:  # noqa: BLE001 - recorded, not raised
+            return f"follow-up-nudges failed: {type(exc).__name__}"
+        if not threads:
+            return "follow-up-nudges: nothing awaiting a reply"
+        lines = ", ".join(
+            f"{t['subject'] or '(no subject)'} ({t['from']})" for t in threads)
+        return f"follow-up-nudges: {len(threads)} awaiting a reply: {lines}"
     if job.get("action") == "urgent-email-check":
         # Urgent-email smart announcements (v0.3.10): yesterday's mail
         # is not worth waking the house for, so only the last day's
@@ -439,11 +459,11 @@ def tasks_list():
 def tasks_create():
     """Create a recurring job from the UI. The action must be one of
     the executor's built-in actions ('connection-check' by default,
-    or 'urgent-email-check'); anything else is rejected so a typo
-    can't silently create a job that never runs."""
+    'urgent-email-check', or 'follow-up-nudges'); anything else is
+    rejected so a typo can't silently create a job that never runs."""
     b = request.get_json(silent=True) or {}
     action = b.get("action") or "connection-check"
-    if action not in ("connection-check", "urgent-email-check"):
+    if action not in ("connection-check", "urgent-email-check", "follow-up-nudges"):
         return jsonify(error=f"unknown task action: {action!r}"), 400
     try:
         minutes = int(b["every_minutes"]) if b.get("every_minutes") not in (None, "") else None
