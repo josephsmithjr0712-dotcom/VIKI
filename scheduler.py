@@ -99,8 +99,23 @@ class Scheduler:
             if not m:
                 raise ValueError('daily tasks need at="HH:MM" (24-hour)')
             spec = {"at": f"{m.group(1)}:{m.group(2)}"}
+        elif kind == "once":
+            # One-shot job: runs a single time at a full date+time, then
+            # turns itself off (see run_due). Strict formats only, so a
+            # typo can't silently create a job that never fires.
+            raw = str(at or "").strip()
+            when = None
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+                try:
+                    when = datetime.strptime(raw, fmt)
+                    break
+                except ValueError:
+                    continue
+            if when is None:
+                raise ValueError('once tasks need at="YYYY-MM-DD HH:MM"')
+            spec = {"at": when.strftime("%Y-%m-%d %H:%M")}
         else:
-            raise ValueError(f"unknown task kind: {kind!r} (expected 'interval' or 'daily')")
+            raise ValueError(f"unknown task kind: {kind!r} (expected 'interval', 'daily' or 'once')")
         job = {
             "id": f"{_slug(name)}-{uuid.uuid4().hex[:6]}",
             "name": name,
@@ -166,6 +181,14 @@ class Scheduler:
             if last is not None and last.date() == now.date():
                 return False  # already ran today: once per day, no repeats
             return now.time() >= time(hh, mm)
+        if job["kind"] == "once":
+            if last is not None:
+                return False  # already fired: one-shot jobs never repeat
+            try:
+                when = datetime.strptime(job["at"], "%Y-%m-%d %H:%M")
+            except (KeyError, ValueError):
+                return False  # malformed job: never fire it by accident
+            return now >= when
         return False
 
     def due(self, now=None):
@@ -182,6 +205,14 @@ class Scheduler:
             if last is None:
                 return now
             return last + timedelta(minutes=job["every_minutes"])
+        if job["kind"] == "once":
+            if last is not None:
+                return None  # already fired
+            try:
+                when = datetime.strptime(job["at"], "%Y-%m-%d %H:%M")
+            except (KeyError, ValueError):
+                return None
+            return now if when <= now else when
         hh, mm = (int(x) for x in job["at"].split(":"))
         candidate = datetime.combine(now.date(), time(hh, mm))
         if last is not None and last.date() == now.date():
@@ -212,6 +243,8 @@ class Scheduler:
                 job["last_result"] = str(executor(dict(job)))
             except Exception as exc:  # noqa: BLE001 - recorded, not swallowed silently
                 job["last_error"] = f"{type(exc).__name__}: {exc}"
+            if job["kind"] == "once":
+                job["enabled"] = False  # one-shot: fired, so switch it off
             outcomes.append({
                 "id": job["id"],
                 "name": job["name"],

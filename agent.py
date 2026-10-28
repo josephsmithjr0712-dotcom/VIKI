@@ -67,6 +67,21 @@ _TRANSIENT_ERRORS = tuple(
 # with a steer to change approach, instead of burning steps in a loop.
 _MAX_IDENTICAL_CALLS = 3
 
+# Tool-result history cap: a single huge tool result (a long web page, a
+# big file read) would otherwise land verbatim in every later model turn,
+# bloating context and slowing the small local model. History keeps the
+# first chunk plus a marker saying it was cut; the frontend's own
+# tool_result slice is unchanged.
+_MAX_TOOL_RESULT_CHARS = 4000
+
+
+def _truncate_tool_result(result):
+    """Cap a tool result for model history, marking any cut."""
+    if len(result) <= _MAX_TOOL_RESULT_CHARS:
+        return result
+    return (result[:_MAX_TOOL_RESULT_CHARS]
+            + f"\n[tool result truncated: showing first {_MAX_TOOL_RESULT_CHARS} of {len(result)} characters]")
+
 
 def _args_key(args):
     """Canonical string for a tool-call argument dict (for repeat detection)."""
@@ -382,7 +397,7 @@ class VIKI:
                         if payload:
                             emit("map", payload)
                     used.append({"name": name, "arguments": args, "result": result[:500]})
-                    messages.append({"role": "tool", "tool_name": name, "content": result})
+                    messages.append({"role": "tool", "tool_name": name, "content": _truncate_tool_result(result)})
                     if repeats == 2:
                         messages.append({"role": "user", "content": (
                             f"System note: you just called {name} with identical arguments "

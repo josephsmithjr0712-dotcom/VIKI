@@ -310,9 +310,9 @@ SPECS = {
     "check_connections": _spec("check_connections", "Check the user's connected accounts right now: unread Gmail from the last day plus today's Google Calendar. Use when asked what's new, or before a morning brief.", {}, []),
     "update_profile": _spec("update_profile", "Save something lasting about the user to their profile: a like, dislike, hobby, favorite (needs favorite_key, e.g. 'coffee'), or note. Use when the user states a lasting preference. Never save secrets.", {"kind": S("like|dislike|hobby|favorite|note"), "value": S("e.g. 'black coffee' or 'quiet mornings'"), "favorite_key": S("for kind=favorite only, e.g. 'coffee'")}, ["kind", "value"]),
     "get_profile": _spec("get_profile", "Read the user's profile: likes, dislikes, hobbies, favorites, notes. Use it to tailor answers.", {}, []),
-    "schedule_task": _spec("schedule_task", "Set up a recurring check VIKI runs on her own (needs user approval). kind: 'daily' needs at='HH:MM' (24-hour); 'interval' needs every_minutes. action is currently 'connection-check' only: unread mail + today's calendar, saved as the latest brief.", {"name": S("e.g. 'morning connection check'"), "kind": S("daily|interval"), "action": S("'connection-check'"), "at": S("for daily: 'HH:MM'"), "every_minutes": S("for interval: minutes, 1 or more")}, ["name", "kind", "action"], risky=True),
-    "list_tasks": _spec("list_tasks", "List VIKI's scheduled recurring checks: name, schedule, last run, last result.", {}, []),
-    "remove_task": _spec("remove_task", "Delete a scheduled recurring check by its id (from list_tasks). Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
+    "schedule_task": _spec("schedule_task", "Set up a check VIKI runs on her own (needs user approval). kind: 'daily' needs at='HH:MM' (24-hour); 'interval' needs every_minutes; 'once' needs at='YYYY-MM-DD HH:MM' and runs a single time, then turns itself off. action is currently 'connection-check' only: unread mail + today's calendar, saved as the latest brief.", {"name": S("e.g. 'morning connection check'"), "kind": S("daily|interval|once"), "action": S("'connection-check'"), "at": S("for daily: 'HH:MM'; for once: 'YYYY-MM-DD HH:MM'"), "every_minutes": S("for interval: minutes, 1 or more")}, ["name", "kind", "action"], risky=True),
+    "list_tasks": _spec("list_tasks", "List VIKI's scheduled checks: name, schedule, last run, last result.", {}, []),
+    "remove_task": _spec("remove_task", "Delete a scheduled check by its id (from list_tasks). Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
     "list_files": _spec("list_files", "List files in your workspace folder."),
     "read_file": _spec("read_file", "Read a text file from the workspace.", {"path": S("relative path")}, ["path"]),
     "write_file": _spec("write_file", "Create or overwrite a text file in the workspace (notes, drafts, reports). Needs user approval.",
@@ -491,7 +491,7 @@ class Toolbox:
                         and (n not in UPDATE_TOOLS or update_configured())]
 
     def _schedule_task(self, name, kind, action, at=None, every_minutes=None):
-        """Create a recurring job. Only 'connection-check' is executable
+        """Create a recurring or one-shot job. Only 'connection-check' is executable
         today; anything else is refused with guidance instead of a job
         that would silently do nothing."""
         if str(action or "").strip() != "connection-check":
@@ -506,7 +506,9 @@ class Toolbox:
                                      every_minutes=minutes, at=at or None)
         except ValueError as e:
             return f"Could not schedule that: {e}"
-        when = f"daily at {job['at']}" if job["kind"] == "daily" else f"every {job['every_minutes']} minutes"
+        when = f"daily at {job['at']}" if job["kind"] == "daily" else \
+            f"once at {job['at']}" if job["kind"] == "once" else \
+            f"every {job['every_minutes']} minutes"
         return f"Scheduled '{job['name']}' ({when}, id {job['id']})."
 
     def _list_tasks(self):
@@ -515,7 +517,9 @@ class Toolbox:
             return "No scheduled tasks."
         out = []
         for t in tasks:
-            when = f"daily at {t['at']}" if t["kind"] == "daily" else f"every {t.get('every_minutes')} minutes"
+            when = f"daily at {t['at']}" if t["kind"] == "daily" else \
+                f"once at {t['at']}" if t["kind"] == "once" else \
+                f"every {t.get('every_minutes')} minutes"
             line = f"[{t['id']}] {t['name']} — {when} — {'on' if t.get('enabled') else 'off'}"
             if t.get("last_run"):
                 line += f" — last run {t['last_run']}"
