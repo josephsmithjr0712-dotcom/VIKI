@@ -60,6 +60,17 @@ class VoiceConfig:
     # VIKI speaks: speech here skips the wake word. 0 = disabled.
 
 
+# Words that stop VIKI mid-flow instead of running the agent (v0.3.16).
+# Exact-phrase match on the normalized transcript: "stop" halts her, but
+# "stop my timer" still goes to the agent — it may be a real command.
+STOP_WORDS = {"stop", "cancel", "quiet", "shut up", "never mind", "stop talking"}
+
+
+def is_stop_command(text: str) -> bool:
+    """True when the transcript is a bare stop phrase (case/punctuation free)."""
+    return text.strip().lower().strip(" .!?") in STOP_WORDS
+
+
 # --- audio primitives (numpy-free where easy; sounddevice only at the edges) --
 def _mean_abs(frame: bytes) -> float:
     import array
@@ -350,6 +361,10 @@ class VoiceLoop:
         self._ensure_stages(with_wake=False)
         text = self.transcriber.transcribe(wav_path).strip()
         if not text:
+            self._lamp_set("restore")
+            return ""
+        if is_stop_command(text):
+            # Bare "stop" / "cancel" halts her without running the agent.
             self._lamp_set("restore")
             return ""
         print(f"heard: {text}")

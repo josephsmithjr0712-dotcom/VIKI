@@ -372,17 +372,29 @@ function setBusy(b,t){busy=b;document.body.classList.toggle('thinking',b);
   $('#stop').style.display=b?'grid':'none';$('#send').style.display=b?'none':'grid';
   $('#statuslabel').textContent=t||(b?'Working':'Server');
   $('#statuspill').classList.toggle('off',!!b)}
-let edgeAudio=null;
-async function speakEdge(text){
+let edgeAudio=null, speakQueue=[], speakBusy=false, speakGen=0, turnDone=false, speechInterrupted=false;
+function stopSpeech(){ speakGen++; speakQueue=[]; if(edgeAudio){edgeAudio.pause();edgeAudio=null} speakBusy=false; }
+function maybeResumeListening(){ if(handsfreeOn&&!speakBusy&&!speakQueue.length&&turnDone) startListening(); }
+async function playNextSpeech(){
+  if(speakBusy||!speakQueue.length) return;
+  speakBusy=true; const gen=speakGen, text=speakQueue.shift();
   try{
-    if(edgeAudio){edgeAudio.pause();edgeAudio=null}
     const r=await fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
     if(!r.ok) throw new Error('tts '+r.status);
+    if(gen!==speakGen) return;
     const url=URL.createObjectURL(await r.blob());
     edgeAudio=new Audio(url);
-    edgeAudio.onended=edgeAudio.onerror=()=>{URL.revokeObjectURL(url);edgeAudio=null;if(handsfreeOn)startListening()};
+    $('#statuslabel').textContent='Speaking… (tap mic to interrupt)';
+    edgeAudio.onended=edgeAudio.onerror=()=>{URL.revokeObjectURL(url);edgeAudio=null;speakBusy=false;playNextSpeech();maybeResumeListening()};
     edgeAudio.play();
-  }catch(e){}
+  }catch(e){ speakBusy=false; playNextSpeech(); maybeResumeListening(); }
+}
+function speakEdge(text){ if(!text) return; speakQueue.push(text); playNextSpeech(); }
+// Split streamed text into complete sentences; returns [sentences, remainder].
+function splitSentences(buf){
+  const m=buf.match(/[^.!?]+[.!?]+["']?\s*/g);
+  if(!m) return [[],buf];
+  const spoken=m.join(''); return [m, buf.slice(spoken.length)];
 }
 let staged=[]; // staged attachments: {id,kind,mime,name,size,_url?}
 const stagedEl=$('#staged');
@@ -415,6 +427,7 @@ $('#attach').onchange=async e=>{
 };
 async function send(text){
   text=(text||input.value).trim(); if((!text&&!staged.length)||busy) return;
+  turnDone=false; speechInterrupted=false; stopSpeech();
   if(!chatId) await loadChats();
   if(feed.querySelector('.empty')) feed.innerHTML='';
   input.value=''; input.style.height='auto';
@@ -423,6 +436,7 @@ async function send(text){
   add('user',esc(text)+(text&&attLabel?'<br>':'')+attLabel);
   staged.forEach(s=>{if(s._url)URL.revokeObjectURL(s._url)}); staged=[]; renderStaged();
   const turn=add('agent',''); let bubble=null, raw='', thinkEl=null, planEl=null; const tools={};
+  let speakBuf='', streamedSpeech=false;
   const ensureBubble=()=>{if(!bubble){bubble=document.createElement('div');bubble.className='bubble glass cursor';turn.insertBefore(bubble,turn.querySelector('.ts'))}};
   setBusy(true);
   try{
@@ -434,8 +448,10 @@ async function send(text){
       for(const p of parts){ if(!p.startsWith('data: ')) continue; const {kind,data}=JSON.parse(p.slice(6));
         if(kind==='status') $('#statuslabel').textContent=data;
         else if(kind==='thinking'){ if(!thinkEl){thinkEl=document.createElement('div');thinkEl.className='think';turn.insertBefore(thinkEl,turn.firstChild)} thinkEl.textContent+=data; thinkEl.scrollTop=1e6 }
-        else if(kind==='token'){ ensureBubble(); raw+=data; bubble.innerHTML=md(raw) }
-        else if(kind==='reset_answer'){ raw=''; if(bubble){bubble.remove();bubble=null} thinkEl=null }
+        else if(kind==='token'){ ensureBubble(); raw+=data; bubble.innerHTML=md(raw);
+          if(handsfreeOn||$('#speak').checked){ speakBuf+=data; const [done2,rest]=splitSentences(speakBuf); speakBuf=rest;
+            done2.forEach(s=>{streamedSpeech=true;speakEdge(s.trim())}); } }
+        else if(kind==='reset_answer'){ raw=''; if(bubble){bubble.remove();bubble=null} thinkEl=null; speakBuf=''; stopSpeech(); }
         else if(kind==='plan'){ if(!planEl){planEl=document.createElement('div');planEl.className='plan glass';turn.insertBefore(planEl,turn.firstChild)}
           planEl.innerHTML='<h4>Plan</h4><ul>'+data.map(s=>`<li class="${esc((s.status||'pending').toLowerCase())}"><i></i><span>${esc(s.text||'')}</span></li>`).join('')+'</ul>' }
         else if(kind==='tool_start'){ if(data.name==='update_plan') continue; const d=document.createElement('details');d.className='tool glass';
@@ -449,12 +465,17 @@ async function send(text){
           turn.append(a); $('#statuslabel').textContent='Waiting for approval' }
         else if(kind==='done'){ ensureBubble(); bubble.classList.remove('cursor');
           if(data.type==='error'){bubble.classList.add('err');bubble.textContent=data.content} else {bubble.innerHTML=md(data.content||'(no answer)')}
-          if((handsfreeOn||$('#speak').checked)&&data.content){speakEdge(data.content)} }
+          turnDone=true;
+          if(!speechInterrupted&&(handsfreeOn||$('#speak').checked)){
+            if(streamedSpeech){ if(speakBuf.trim()) speakEdge(speakBuf.trim()); }
+            else if(data.content){ speakEdge(data.content); } }
+          speechInterrupted=false; maybeResumeListening(); }
         feed.scrollTop=feed.scrollHeight;
       }
     }
-  }catch(e){ ensureBubble(); bubble.classList.remove('cursor'); bubble.classList.add('err'); bubble.textContent='Connection lost: '+e.message }
+  }catch(e){ ensureBubble(); bubble.classList.remove('cursor'); bubble.classList.add('err'); bubble.textContent='Connection lost: '+e.message; turnDone=true; maybeResumeListening(); }
   setBusy(false); loadState();
+  if(handsfreeOn&&input.value.trim()) send(); // queued follow-up (e.g. asked while she was speaking)
 }
 const CONNS=[
  {label:'Google',tools:['gmail_search'],hint:'python -m connectors.google_auth'},
@@ -486,15 +507,26 @@ async function newSideChat(){ const r=await fetch('/api/chats',{method:'POST',he
 $('#new').onclick=()=>newSideChat();
 $('#newside').onclick=()=>newSideChat();
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-let rec=null, recOn=false, handsfreeOn=false;
-function startListening(){ if(!rec||recOn) return; try{rec.start();recOn=true;$('#mic').classList.add('on')}catch(e){} }
+let rec=null, recOn=false, handsfreeOn=false, micErrs=0, lastMicErr=0, restartSuppressed=false;
+function startListening(){ if(!rec||recOn) return; try{rec.start();recOn=true;$('#mic').classList.add('on');$('#statuslabel').textContent='Listening…'}catch(e){} }
 function stopListening(){ if(!rec||!recOn) return; try{rec.stop()}catch(e){} }
-if(SR){rec=new SR();rec.interimResults=false;
-  rec.onresult=e=>{input.value=(input.value+' '+e.results[0][0].transcript).trim();input.oninput()};
-  rec.onend=()=>{recOn=false;$('#mic').classList.remove('on');if(handsfreeOn&&input.value.trim())send()};
-  $('#mic').onclick=()=>{recOn?stopListening():startListening()}} else $('#mic').style.display='none';
+if(SR){rec=new SR();rec.interimResults=true;
+  rec.onresult=e=>{ const res=e.results[e.results.length-1];
+    if(res.isFinal){ input.value=(input.value+' '+res[0].transcript).trim(); input.oninput(); }
+    else { $('#statuslabel').textContent='“'+res[0].transcript+'”'; } };
+  rec.onerror=e=>{ recOn=false; $('#mic').classList.remove('on');
+    if(!handsfreeOn) return;
+    if(e.error==='not-allowed'||e.error==='service-not-allowed'){ handsfreeOn=false; $('#handsfree').classList.remove('active'); $('#statuslabel').textContent='Mic blocked — tap ≋ to retry'; return; }
+    const now=Date.now(); micErrs=(now-lastMicErr<5000)?micErrs+1:1; lastMicErr=now;
+    if(micErrs>=3){ handsfreeOn=false; $('#handsfree').classList.remove('active'); $('#statuslabel').textContent='Mic trouble — tap ≋ to retry'; }
+    else setTimeout(()=>{ if(handsfreeOn) startListening(); },300); };
+  rec.onend=()=>{recOn=false;$('#mic').classList.remove('on');
+    if(restartSuppressed){ restartSuppressed=false; return; }
+    if(handsfreeOn){ if(input.value.trim()) send(); else setTimeout(()=>{ if(handsfreeOn) startListening(); },150); } };
+  $('#mic').onclick=()=>{ if(edgeAudio||speakQueue.length||speakBusy){ speechInterrupted=true; stopSpeech(); startListening(); return; }
+    if(recOn){ restartSuppressed=true; stopListening(); } else startListening(); }} else $('#mic').style.display='none';
 $('#handsfree').onclick=()=>{ handsfreeOn=!handsfreeOn; $('#handsfree').classList.toggle('active',handsfreeOn);
-  if(handsfreeOn) startListening(); else { stopListening(); if(edgeAudio){edgeAudio.pause();edgeAudio=null} } };
+  if(handsfreeOn){ micErrs=0; startListening(); } else { restartSuppressed=true; stopListening(); speechInterrupted=true; stopSpeech(); } };
 $('#logout').onclick=async()=>{ await fetch('/logout',{method:'POST'}); location.href='/login'; };
 // If the session expired, bounce to the login page.
 const _fetch = window.fetch;

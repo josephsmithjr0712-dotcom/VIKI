@@ -56,9 +56,12 @@ class TestResponsiveUI(unittest.TestCase):
     def test_handsfree_quick_reply_loop(self):
         self.assertIn("handsfreeOn", self.js)
         self.assertIn("function startListening", self.js)
-        self.assertIn("if(handsfreeOn&&input.value.trim())send()", self.js)
+        # Recognition end sends the transcript while hands-free is on…
+        self.assertIn("if(input.value.trim()) send();", self.js)
+        # …and replies are spoken back in hands-free / read-aloud mode.
         self.assertIn("handsfreeOn||$('#speak').checked", self.js)
-        self.assertIn("if(handsfreeOn)startListening()", self.js)
+        # Listening resumes once speech finishes (v0.3.16 speech queue).
+        self.assertIn("maybeResumeListening()", self.js)
 
     def test_history_search_wired(self):
         self.assertIn('id="histsearch"', self.html)
