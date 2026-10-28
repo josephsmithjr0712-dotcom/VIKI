@@ -242,15 +242,36 @@ def _run_connection_job(job):
     return f"No built-in action for {job.get('action')!r}."
 
 
+def _tick_pending_retry(announce_fn=None, log=None, states=None,
+                        ping=None, phone_ip=None, now=None):
+    """Best-effort retry of queued one-off announcements (v0.3.15).
+
+    The tick calls this every minute with defaults; injectables exist
+    for tests. Never raises: a retry failure must not kill the tick
+    loop. Returns the retry summary string ("" when nothing was
+    pending or the retry itself failed).
+    """
+    try:
+        from smart_announce import retry_pending_announcements
+
+        return retry_pending_announcements(
+            announce_fn=announce_fn, log=log, states=states, ping=ping,
+            phone_ip=phone_ip, now=now)
+    except Exception:
+        return ""
+
+
 def _scheduler_tick():
-    """Background loop: every 60s, run due jobs. Never dies on an error —
-    a failed tick just means the next minute's tick tries again."""
+    """Background loop: every 60s, run due jobs + retry any queued
+    one-off announcements. Never dies on an error — a failed tick
+    just means the next minute's tick tries again."""
     while True:
         time.sleep(60)
         try:
             task_scheduler.run_due(_run_connection_job)
         except Exception:
             pass
+        _tick_pending_retry()
 
 
 threading.Thread(target=_scheduler_tick, daemon=True).start()

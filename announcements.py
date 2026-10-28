@@ -14,6 +14,10 @@ and safe to call from any announcement path:
 - ``welcome_home_due``: the welcome-home greeting fires only when
   Joey's phone is home AND the lights are on AND it is after 3pm on a
   weekday — and only once per day.
+- Pending queue (v0.3.15): a one-off announcement that is skipped by
+  a gate (quiet hours, phone away, lights off) is queued instead of
+  lost, and retried on the next scheduler tick until it speaks or
+  expires (24 hours).
 
 Wired into ``connectors/home_mini.py`` ``announce()`` since v0.2.26
 (dedupe on by default; only successful announcements are recorded).
@@ -31,6 +35,9 @@ from pathlib import Path
 
 # How long an announced message stays "already said" (days).
 RETENTION_DAYS = 30
+
+# How long a queued (not yet spoken) announcement stays retryable.
+PENDING_TTL_DAYS = 1
 
 # Welcome-home greeting rules (Joey, 2026-10-23): weekdays, after 3pm.
 WELCOME_AFTER_HOUR = 15
@@ -78,7 +85,8 @@ class AnnouncementLog:
         tmp.replace(self.path)
 
     def _prune(self, now: datetime | None = None) -> None:
-        """Drop announced entries older than RETENTION_DAYS."""
+        """Drop announced entries older than RETENTION_DAYS and
+        pending entries older than PENDING_TTL_DAYS."""
         now = now or datetime.now()
         kept = {}
         for fp, stamp in self._data.get("announced", {}).items():
@@ -89,6 +97,15 @@ class AnnouncementLog:
             if (now - when).days < RETENTION_DAYS:
                 kept[fp] = stamp
         self._data["announced"] = kept
+        pending = []
+        for entry in self._data.get("pending", []):
+            try:
+                when = datetime.fromisoformat(entry.get("at", ""))
+            except (TypeError, ValueError):
+                continue
+            if (now - when).days < PENDING_TTL_DAYS:
+                pending.append(entry)
+        self._data["pending"] = pending
 
     # -- announcements ---------------------------------------------------
     def already_announced(self, text: str) -> bool:
@@ -106,6 +123,52 @@ class AnnouncementLog:
         if self.already_announced(text):
             return False, "already announced"
         return True, "ok"
+
+    # -- pending queue (v0.3.15) ---------------------------------------
+    def queue_pending(self, text: str, when: datetime | None = None) -> bool:
+        """Queue a skipped one-off announcement for a later retry.
+
+        Returns False (and queues nothing) for an empty text, a text
+        already spoken, or a text already queued — a retry must never
+        duplicate a message. Returns True when newly queued.
+        """
+        text = (text or "").strip()
+        if not text:
+            return False
+        if self.already_announced(text):
+            return False
+        pending = self._data.setdefault("pending", [])
+        if any(e.get("fp") == fingerprint(text) for e in pending):
+            return False
+        when = when or datetime.now()
+        pending.append({"fp": fingerprint(text), "text": text,
+                        "at": when.isoformat()})
+        self._save()
+        return True
+
+    def pending_texts(self, now: datetime | None = None) -> list:
+        """Texts still queued and not yet expired (24 hours)."""
+        now = now or datetime.now()
+        texts = []
+        for entry in self._data.get("pending", []):
+            try:
+                when = datetime.fromisoformat(entry.get("at", ""))
+            except (TypeError, ValueError):
+                continue
+            if (now - when).days < PENDING_TTL_DAYS:
+                texts.append(entry.get("text", ""))
+        return [t for t in texts if t]
+
+    def drop_pending(self, text: str) -> bool:
+        """Remove a text from the pending queue. True if it was there."""
+        fp = fingerprint(text or "")
+        pending = self._data.get("pending", [])
+        kept = [e for e in pending if e.get("fp") != fp]
+        if len(kept) == len(pending):
+            return False
+        self._data["pending"] = kept
+        self._save()
+        return True
 
     # -- welcome-home greeting -------------------------------------------
     def welcome_home_due(

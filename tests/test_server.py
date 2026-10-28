@@ -501,5 +501,38 @@ class ServerContractTest(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
 
+@unittest.skipUnless(server_mod is not None,
+                     f"server.py not importable here: {_SERVER_IMPORT_ERROR}")
+class TickPendingRetryTest(unittest.TestCase):
+    """_tick_pending_retry wiring (v0.3.15): the scheduler tick retries
+    queued one-off announcements without ever raising."""
+
+    def test_tick_retry_delegates_and_returns_summary(self):
+        import smart_announce as _sa
+
+        orig = _sa.retry_pending_announcements
+        try:
+            _sa.retry_pending_announcements = (  # noqa: E731
+                lambda *a, **k: "pending announcements: 1 spoken")
+            result = server_mod._tick_pending_retry()
+        finally:
+            _sa.retry_pending_announcements = orig
+        self.assertEqual(result, "pending announcements: 1 spoken")
+
+    def test_tick_retry_never_raises(self):
+        import smart_announce as _sa
+
+        orig = _sa.retry_pending_announcements
+        try:
+            def _boom(*a, **k):
+                raise RuntimeError("speaker down")
+
+            _sa.retry_pending_announcements = _boom
+            result = server_mod._tick_pending_retry()
+        finally:
+            _sa.retry_pending_announcements = orig
+        self.assertEqual(result, "")
+
+
 if __name__ == "__main__":
     unittest.main()

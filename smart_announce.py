@@ -24,6 +24,13 @@ reads as "don't speak", never as a guess):
   10pm and 7am — a skipped announcement is never recorded, so it can
   speak later. Override with VIKI_QUIET_HOURS="22-7" (any "start-end"
   hour pair, overnight wrap allowed); "off" disables the guard.
+- Pending retry (v0.3.15): a scheduled one-off announcement skipped
+  by a gate (quiet hours, phone away, lights off) is queued in the
+  announcement log and retried on every scheduler tick until it
+  speaks, is spoken another way, or expires after 24 hours — so a
+  one-off that fires while Joey is out is delayed, not lost. Jobs
+  that re-scan their own source (urgent emails, follow-up nudges)
+  do not queue: their next run re-detects the item on its own.
 
 All I/O is injectable (``announce_fn``, ``log``, ``states``,
 ``ping``), so the whole module is testable with no network, no Home
@@ -98,6 +105,14 @@ def is_quiet_hours(now=None):
 # Scheduler job actions understood by run_smart_job.
 WELCOME_HOME_ACTION = "welcome-home"
 ANNOUNCE_ACTION_PREFIX = "announce-if-home:"
+
+# Gate-skip reasons that queue a one-off announcement for a later
+# retry (v0.3.15). Speak failures are NOT queued: a broken speaker
+# retried every minute would just spam the tick log, and the job
+# record already notes the failure. "already announced" needs no
+# retry — the message was spoken another way.
+GATE_SKIP_REASONS = ("quiet hours", "phone not home", "lights off",
+                     "presence unavailable")
 
 
 def _success(result) -> bool:
@@ -261,8 +276,57 @@ def run_smart_job(job, announce_fn=None, log=None, now=None,
         ok, reason = announce_if_home(text, announce_fn=announce_fn,
                                       log=log, states=states, ping=ping,
                                       phone_ip=phone_ip, now=now)
+        if not ok and reason in GATE_SKIP_REASONS:
+            # One-off jobs have no re-scan: without a queue, a skip
+            # here means the announcement is lost. Queue it so the
+            # scheduler tick retries it (v0.3.15).
+            log_obj = _get_log(log)
+            if log_obj is not None:
+                try:
+                    log_obj.queue_pending(text)
+                except Exception:
+                    pass
+            return f"announce-if-home: {reason} (queued for later)"
         return f"announce-if-home: {'spoken' if ok else reason}"
     return f"unknown smart-announcement job: {action!r}"
+
+
+def retry_pending_announcements(announce_fn=None, log=None, now=None,
+                                states=None, ping=None, phone_ip=None):
+    """Speak queued one-off announcements whose gates now pass.
+
+    Called by the scheduler tick every minute (v0.3.15). Each pending
+    item goes through announce_if_home, so the usual gates still
+    apply; an item that still can't speak stays queued for the next
+    tick, and one spoken another way is dropped, not repeated.
+    Returns a short summary string, e.g. "pending announcements: 1
+    spoken" or "no pending announcements".
+    """
+    log_obj = _get_log(log)
+    if log_obj is None:
+        return "no pending announcements"
+    pending = log_obj.pending_texts(now=now)
+    if not pending:
+        return "no pending announcements"
+    spoken, skipped = 0, []
+    for text in pending:
+        ok, reason = announce_if_home(text, announce_fn=announce_fn,
+                                      log=log_obj, states=states,
+                                      ping=ping, phone_ip=phone_ip,
+                                      now=now)
+        if ok or reason == "already announced":
+            try:
+                log_obj.drop_pending(text)
+            except Exception:
+                pass
+            if ok:
+                spoken += 1
+        else:
+            skipped.append(reason)
+    summary = f"pending announcements: {spoken} spoken"
+    if skipped:
+        summary += f", {len(skipped)} still waiting ({', '.join(sorted(set(skipped)))})"
+    return summary
 
 
 # --- urgent-email announcements (v0.3.10) ---------------------------------
