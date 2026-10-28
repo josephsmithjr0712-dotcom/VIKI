@@ -1,6 +1,8 @@
 """VIKI agent core: a plan -> act -> observe loop on top of Ollama tool calling."""
 import json, os, secrets, time
+import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 try:
     import ollama
 except ImportError:
@@ -74,6 +76,65 @@ def _args_key(args):
         return repr(sorted((str(k), str(v)) for k, v in args.items()))
 
 
+# Cloud-model option (v0.3.18): when VIKI_CLOUD_MODEL, VIKI_CLOUD_BASE_URL
+# and VIKI_CLOUD_API_KEY are all set, model turns go to an OpenAI-compatible
+# chat-completions endpoint instead of local Ollama. Any cloud failure falls
+# back to local Ollama — a turn never dies on the cloud. The key is only
+# ever sent in the Authorization header, never logged, printed, or put in a
+# URL. It lives in the server .env, never in code. Tool schemas pass
+# through unchanged: local schemas already use OpenAI's function format.
+def _cloud_config():
+    """Cloud config from env, or None when not fully set.
+
+    Empty values count as unset, so a half-configured .env stays local.
+    Timeout is seconds per HTTP read (VIKI_CLOUD_TIMEOUT, default 60)."""
+    model = (os.getenv("VIKI_CLOUD_MODEL") or "").strip()
+    base = (os.getenv("VIKI_CLOUD_BASE_URL") or "").strip().rstrip("/")
+    key = (os.getenv("VIKI_CLOUD_API_KEY") or "").strip()
+    if not (model and base and key):
+        return None
+    try:
+        timeout = float(os.getenv("VIKI_CLOUD_TIMEOUT", "60"))
+    except (TypeError, ValueError):
+        timeout = 60.0
+    if timeout <= 0:
+        timeout = 60.0
+    return {"model": model, "base_url": base, "api_key": key, "timeout": timeout}
+
+
+def _cloud_messages(messages):
+    """Translate a local message list to OpenAI chat format.
+
+    Assistant tool calls get synthetic ids (local calls carry none) and the
+    following tool messages are paired to them in order; tool_name is
+    dropped (OpenAI links via tool_call_id instead). Raises ValueError on
+    a shape that cannot be paired, so the caller falls back to local."""
+    out, pending, n = [], [], 0
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            calls = []
+            for c in m["tool_calls"]:
+                fn = c.get("function", {}) if isinstance(c, dict) else getattr(c, "function", {})
+                name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
+                args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", {})
+                call_id = f"call_{n}"
+                n += 1
+                pending.append(call_id)
+                calls.append({"id": call_id, "type": "function",
+                              "function": {"name": name,
+                                           "arguments": args if isinstance(args, str) else json.dumps(args or {})}})
+            out.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
+        elif role == "tool":
+            if not pending:
+                raise ValueError("tool message without a preceding tool call")
+            out.append({"role": "tool", "tool_call_id": pending.pop(0),
+                        "content": m.get("content") or ""})
+        else:
+            out.append({"role": role, "content": m.get("content") or ""})
+    return out
+
+
 class VIKI:
     def __init__(self, toolbox):
         load_dotenv()
@@ -114,11 +175,82 @@ class VIKI:
         except Exception as e:
             print(f"[warmup] could not pre-load {self.model}: {e} (will load on first request)")
 
+    def _stream_cloud(self, cfg, messages, tools, think, emit, cancel):
+        """One model turn via an OpenAI-compatible chat-completions endpoint.
+
+        Returns (content, thinking, calls) like _stream; thinking is always
+        "" here (cloud deltas don't expose reasoning). Raises on ANY failure
+        (network, non-2xx, bad payload, unpaired tool call) so the caller
+        can fall back to local Ollama. The API key travels only in the
+        Authorization header and is never included in any error."""
+        payload = {"model": cfg["model"], "messages": _cloud_messages(messages),
+                   "stream": True, "temperature": 0.2, "top_p": 0.9}
+        if tools:
+            payload["tools"] = tools
+        req = urllib.request.Request(
+            cfg["base_url"] + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer " + cfg["api_key"]},
+            method="POST")
+        content, parts, order = [], {}, []
+        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as resp:
+            for raw in resp:
+                if cancel.is_set():
+                    raise Cancelled()
+                line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                chunk = json.loads(data)  # raises on bad payload -> fallback
+                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                if delta.get("content"):
+                    content.append(delta["content"])
+                    emit("token", delta["content"])
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0)
+                    if idx not in parts:
+                        parts[idx] = {"name": "", "arguments": ""}
+                        order.append(idx)
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        parts[idx]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        parts[idx]["arguments"] += fn["arguments"]
+        calls = []
+        for idx in order:
+            part = parts[idx]
+            if not part["name"]:
+                raise ValueError("cloud tool call without a name")
+            try:
+                args = json.loads(part["arguments"] or "{}")
+            except ValueError:
+                raise ValueError("cloud tool call with unparsable arguments")
+            if not isinstance(args, dict):
+                raise ValueError("cloud tool call arguments are not an object")
+            calls.append(SimpleNamespace(function=SimpleNamespace(name=part["name"], arguments=args)))
+        return "".join(content), "", calls
+
     def _stream(self, messages, tools, think, emit, cancel):
         """One model turn. Degrades gracefully when thinking/tools are unsupported.
         Transient connection errors are retried (VIKI_RETRIES, default 2) with
         exponential backoff (VIKI_RETRY_DELAY seconds, default 1.0) before the
-        failure surfaces as an error result."""
+        failure surfaces as an error result.
+        When the cloud-model env vars are all set (and the turn has no images,
+        which the cloud path does not translate), the turn goes to the cloud
+        first; any cloud failure falls back to local Ollama below. The
+        exception text is never surfaced: it could theoretically echo
+        request details."""
+        cloud = _cloud_config()
+        if cloud and not any(m.get("images") for m in messages):
+            try:
+                return self._stream_cloud(cloud, messages, tools, think, emit, cancel)
+            except Cancelled:
+                raise
+            except Exception:
+                emit("status", "Cloud model unavailable, falling back to the local model.")
         retries_left, delay = self.retries, self.retry_delay
         while True:
             kw = dict(model=self.model, messages=messages, stream=True, options={"temperature": 0.2, "top_p": 0.9})
