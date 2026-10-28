@@ -181,6 +181,46 @@ class TestVoiceLoopOrchestration(TestCase):
         self.assertEqual(agent_texts, ["first"])
         self.assertEqual(spoken, ["Yes, boss?", "reply to: first"])
 
+class TestDefaultAgentRunner(TestCase):
+    """Regression tests for v0.3.17: the headless voice path used to call
+    VIKI(model=..., tools=...) — which __init__ rejects — and read a
+    "text" key that run() never returns, so it could never answer."""
+
+    def _runner_with(self, run_result):
+        from unittest.mock import patch
+        loop = vl.VoiceLoop(transcriber=MagicMock(), speaker=MagicMock(),
+                            agent_runner=None, lamp=False)
+        # _default_agent_runner builds its own stages; stub them out.
+        fake_viki = MagicMock()
+        fake_viki.run.return_value = run_result
+        viki_cls = patch("agent.VIKI", return_value=fake_viki).start()
+        toolbox_cls = patch("tools.Toolbox").start()
+        patch("memory.SessionStore").start()
+        self.addCleanup(patch.stopall)
+        return loop, fake_viki, viki_cls, toolbox_cls
+
+    def test_default_runner_returns_agent_content(self):
+        loop, fake_viki, viki_cls, toolbox_cls = self._runner_with(
+            {"type": "text", "content": "It is noon."})
+        self.assertEqual(loop._default_agent_runner("what time is it"), "It is noon.")
+        # VIKI is constructed with exactly one positional arg: the toolbox.
+        viki_cls.assert_called_once_with(toolbox_cls.return_value)
+        fake_viki.run.assert_called_once()
+
+    def test_default_runner_falls_back_only_on_empty_content(self):
+        loop, _, _, _ = self._runner_with({"type": "text", "content": ""})
+        self.assertEqual(loop._default_agent_runner("hello"),
+                         "Hmm, I came up empty on that one.")
+
+    def test_default_runner_approval_denied_message(self):
+        loop, _, _, _ = self._runner_with(
+            {"type": "approval_denied", "content": ""})
+        self.assertEqual(loop._default_agent_runner("send an email"),
+                         "That needs your approval, boss — "
+                         "tap Allow in the web UI and ask me again.")
+
+
+class TestVoiceLoopOrchestrationEmpty(TestCase):
     def test_empty_transcript_says_nothing(self):
         transcriber = MagicMock()
         transcriber.transcribe.return_value = "   "

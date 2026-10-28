@@ -344,13 +344,19 @@ class VoiceLoop:
 
         store = SessionStore()
         tb = Toolbox(store)
-        viki = VIKI(model=os.getenv("VIKI_MODEL", "llama3.2:latest"), tools=tb)
+        # VIKI takes a single toolbox argument (model comes from VIKI_MODEL
+        # inside its constructor); the old model=/tools= kwargs raised
+        # TypeError, so the headless voice path never ran at all (v0.3.17).
+        viki = VIKI(tb)
         events = []
 
         out = viki.run(text, self._history, store.search,
                        emit=lambda k, p: events.append((k, p)),
                        approve=voice_approve, think=False)
-        reply = out.get("text") or ""
+        # run() returns {"type": ..., "content": ...} — the old code read
+        # a "text" key that never exists, so every reply fell through to
+        # the "came up empty" fallback even when the agent answered.
+        reply = out.get("content") or ""
         if out.get("type") == "approval_denied":
             reply = ("That needs your approval, boss — "
                      "tap Allow in the web UI and ask me again.")
