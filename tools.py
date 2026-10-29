@@ -9,7 +9,9 @@ from connectors.google import (
     calendar_list,
     gmail_read,
     gmail_search,
+    gmail_search_structured,
     gmail_send,
+    gmail_unanswered_threads,
     token_exists as google_connected,
 )
 from connectors.github import (
@@ -32,7 +34,7 @@ from connectors.digest import connection_check
 from connectors.home_mini import announce as home_announce, list_devices as cast_list_devices
 from connectors.maps import maps_directions, maps_distance, maps_traffic
 from profile import UserProfile
-from scheduler import Scheduler
+from scheduler import Scheduler, TASK_ACTIONS
 from connectors.roku import (
     ha_connected,
     roku_apps,
@@ -310,11 +312,11 @@ SPECS = {
     "check_connections": _spec("check_connections", "Check the user's connected accounts right now: unread Gmail from the last day plus today's Google Calendar. Use when asked what's new, or before a morning brief.", {}, []),
     "update_profile": _spec("update_profile", "Save something lasting about the user to their profile: a like, dislike, hobby, favorite (needs favorite_key, e.g. 'coffee'), or note. Use when the user states a lasting preference. Never save secrets.", {"kind": S("like|dislike|hobby|favorite|note"), "value": S("e.g. 'black coffee' or 'quiet mornings'"), "favorite_key": S("for kind=favorite only, e.g. 'coffee'")}, ["kind", "value"]),
     "get_profile": _spec("get_profile", "Read the user's profile: likes, dislikes, hobbies, favorites, notes. Use it to tailor answers.", {}, []),
-    "schedule_task": _spec("schedule_task", "Set up a check VIKI runs on her own (needs user approval). kind: 'daily' needs at='HH:MM' (24-hour); 'interval' needs every_minutes; 'once' needs at='YYYY-MM-DD HH:MM' and runs a single time, then turns itself off. action is currently 'connection-check' only: unread mail + today's calendar, saved as the latest brief.", {"name": S("e.g. 'morning connection check'"), "kind": S("daily|interval|once"), "action": S("'connection-check'"), "at": S("for daily: 'HH:MM'; for once: 'YYYY-MM-DD HH:MM'"), "every_minutes": S("for interval: minutes, 1 or more")}, ["name", "kind", "action"], risky=True),
+    "schedule_task": _spec("schedule_task", "Set up a check VIKI runs on her own (needs user approval). kind: 'daily' needs at='HH:MM' (24-hour); 'interval' needs every_minutes; 'once' needs at='YYYY-MM-DD HH:MM' and runs a single time, then turns itself off. action: 'connection-check' (unread mail + today's calendar, saved as the latest brief), 'urgent-email-check' (announces urgent mail when you're home), or 'follow-up-nudges' (lists threads still awaiting your reply).", {"name": S("e.g. 'morning connection check'"), "kind": S("daily|interval|once"), "action": S("'connection-check' | 'urgent-email-check' | 'follow-up-nudges'"), "at": S("for daily: 'HH:MM'; for once: 'YYYY-MM-DD HH:MM'"), "every_minutes": S("for interval: minutes, 1 or more")}, ["name", "kind", "action"], risky=True),
     "list_tasks": _spec("list_tasks", "List VIKI's scheduled checks: name, schedule, action, run count, next run, last run, last result.", {}, []),
     "remove_task": _spec("remove_task", "Delete a scheduled check by its id (from list_tasks). Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
     "toggle_task": _spec("toggle_task", "Pause or resume a scheduled check by its id (from list_tasks). Pausing keeps the check but stops it running; resuming turns it back on. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
-    "run_task_now": _spec("run_task_now", "Run a scheduled check right now by its id (from list_tasks), instead of waiting for its next slot. A paused check stays paused afterwards; a one-shot check is fired by this, so it will not run again later. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
+    "run_task_now": _spec("run_task_now", "Run a scheduled check right now by its id (from list_tasks), instead of waiting for its next slot. Runs the check's own action (connection-check, urgent-email-check, or follow-up-nudges). A paused check stays paused afterwards; a one-shot check is fired by this, so it will not run again later. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
     "rename_task": _spec("rename_task", "Rename a scheduled check by its id (from list_tasks). The schedule and run history stay exactly as they were — only the name changes, so a typo in a name no longer means deleting and recreating the check. Needs user approval.", {"job_id": S("task id"), "name": S("new name")}, ["job_id", "name"], risky=True),
     "reschedule_task": _spec("reschedule_task", "Change when a scheduled check runs, by its id (from list_tasks), without deleting it. kind: 'daily' needs at='HH:MM'; 'interval' needs every_minutes; 'once' needs at='YYYY-MM-DD HH:MM'. The name and run history stay exactly as they were. Needs user approval.", {"job_id": S("task id"), "kind": S("daily|interval|once"), "at": S("for daily: 'HH:MM'; for once: 'YYYY-MM-DD HH:MM'"), "every_minutes": S("for interval: minutes, 1 or more")}, ["job_id", "kind"], risky=True),
     "duplicate_task": _spec("duplicate_task", "Copy a scheduled check by its id (from list_tasks), so you can try a variation without recreating it by hand. The copy keeps the same schedule and action but starts with fresh history (no last run, zero runs) and is named '<name> (copy)'. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
@@ -446,6 +448,49 @@ def viki_apply_update() -> str:
     return updater.apply_update()
 
 
+def _run_job_action(job):
+    """Run one scheduled job by its own action, mirroring the panel
+    button and the scheduled tick (see server.py's executor). A blank
+    action means connection-check, the historical default. Failures
+    are returned as text, never raised into the tick or chat loop;
+    smart_announce imports stay lazy, as in server.py."""
+    action = " ".join(str(job.get("action") or "").split())
+    if action == "follow-up-nudges":
+        try:
+            if not google_connected():
+                return "follow-up-nudges: Google not connected"
+            threads = gmail_unanswered_threads(older_than_days=2, max_threads=10)
+        except Exception as exc:  # noqa: BLE001 - recorded, not raised
+            return f"follow-up-nudges failed: {type(exc).__name__}"
+        if not threads:
+            return "follow-up-nudges: nothing awaiting a reply"
+        lines = ", ".join(
+            f"{t['subject'] or '(no subject)'} ({t['from']})" for t in threads)
+        listed = f"follow-up-nudges: {len(threads)} awaiting a reply: {lines}"
+        try:
+            from smart_announce import announce_followup_nudges
+
+            return listed + "; " + announce_followup_nudges(threads)
+        except Exception as exc:  # noqa: BLE001 - recorded, not raised
+            return (listed + "; follow-up-nudges announcement failed: "
+                    + type(exc).__name__)
+    if action == "urgent-email-check":
+        try:
+            if not google_connected():
+                return "urgent-email-check: Google not connected"
+            messages = gmail_search_structured(
+                "in:inbox newer_than:1d", max_results=20)
+        except Exception as exc:  # noqa: BLE001 - recorded, not raised
+            return f"urgent-email-check failed: {type(exc).__name__}"
+        try:
+            from smart_announce import announce_urgent_emails
+
+            return "urgent-email-check: " + announce_urgent_emails(messages)
+        except Exception as exc:  # noqa: BLE001 - recorded, not raised
+            return f"urgent-email-check failed: {type(exc).__name__}"
+    return connection_check()
+
+
 class Toolbox:
     def __init__(self, store):
         self.store = store
@@ -505,18 +550,20 @@ class Toolbox:
                         and (n not in UPDATE_TOOLS or update_configured())]
 
     def _schedule_task(self, name, kind, action, at=None, every_minutes=None):
-        """Create a recurring or one-shot job. Only 'connection-check' is executable
-        today; anything else is refused with guidance instead of a job
-        that would silently do nothing."""
-        if str(action or "").strip() != "connection-check":
-            return ("Only 'connection-check' can run on its own right now "
-                    "(unread mail + today's calendar). Other actions aren't wired yet.")
+        """Create a recurring or one-shot job. Any of the executor's
+        built-in actions works from chat now — the same three the web
+        panel offers — since the scheduled tick runs them all; an
+        unknown action is refused instead of a job that would never run."""
+        action = " ".join(str(action or "").split())
+        if action not in TASK_ACTIONS:
+            return (f"Unknown check action {action!r} — use one of "
+                    f"{', '.join(TASK_ACTIONS)}.")
         try:
             minutes = int(every_minutes) if every_minutes not in (None, "") else None
         except (TypeError, ValueError):
             return "every_minutes must be a whole number of minutes."
         try:
-            job = self.scheduler.add(name, kind, action="connection-check",
+            job = self.scheduler.add(name, kind, action=action,
                                      every_minutes=minutes, at=at or None)
         except ValueError as e:
             return f"Could not schedule that: {e}"
@@ -639,10 +686,10 @@ class Toolbox:
         return "No task with that id."
 
     def _run_task_now(self, job_id):
-        """Fire one job immediately through the connection check, and
+        """Fire one job immediately through its own action, and
         report what it found. The scheduler records the outcome, so
         the run shows up in list_tasks and on the web panel."""
-        outcome = self.scheduler.run_one(job_id, lambda job: connection_check())
+        outcome = self.scheduler.run_one(job_id, _run_job_action)
         if outcome is None:
             return "No task with that id."
         if outcome["error"]:
