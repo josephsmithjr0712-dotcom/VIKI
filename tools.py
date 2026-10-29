@@ -578,8 +578,10 @@ class Toolbox:
             return "No scheduled tasks."
         out = []
         for t in tasks:
-            when = f"daily at {t['at']}" if t["kind"] == "daily" else \
-                f"once at {t['at']}" if t["kind"] == "once" else \
+            # .get, not ['at']: a hand-edited tasks.json can hold a daily
+            # job with no at, and one bad line must not crash the list.
+            when = f"daily at {t.get('at', '?')}" if t["kind"] == "daily" else \
+                f"once at {t.get('at', '?')}" if t["kind"] == "once" else \
                 f"every {t.get('every_minutes')} minutes"
             line = f"[{t['id']}] {t['name']} — {when} — {'on' if t.get('enabled') else 'off'}"
             if t.get("action"):

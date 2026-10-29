@@ -286,14 +286,24 @@ class Scheduler:
         now = now or datetime.now()
         last = self._parse_last_run(job)
         if job["kind"] == "interval":
+            # A hand-edited tasks.json can hold a job with a missing or
+            # non-numeric every_minutes; never let one bad job crash the
+            # whole tick — it simply never fires.
+            every = job.get("every_minutes")
+            if not isinstance(every, (int, float)) or every < 1:
+                return False
             if last is None:
                 return True  # brand-new job runs once right away
-            return now >= last + timedelta(minutes=job["every_minutes"])
+            return now >= last + timedelta(minutes=every)
         if job["kind"] == "daily":
-            hh, mm = (int(x) for x in job["at"].split(":"))
+            try:
+                hh, mm = (int(x) for x in job["at"].split(":"))
+                slot = time(hh, mm)
+            except (KeyError, ValueError, AttributeError, TypeError):
+                return False  # malformed job: never fire it by accident
             if last is not None and last.date() == now.date():
                 return False  # already ran today: once per day, no repeats
-            return now.time() >= time(hh, mm)
+            return now.time() >= slot
         if job["kind"] == "once":
             if last is not None:
                 return False  # already fired: one-shot jobs never repeat
@@ -315,9 +325,14 @@ class Scheduler:
         now = now or datetime.now()
         last = self._parse_last_run(job)
         if job["kind"] == "interval":
+            # Same malformed-job guard as is_due: a bad spec reports no
+            # next run instead of crashing the task list.
+            every = job.get("every_minutes")
+            if not isinstance(every, (int, float)) or every < 1:
+                return None
             if last is None:
                 return now
-            candidate = last + timedelta(minutes=job["every_minutes"])
+            candidate = last + timedelta(minutes=every)
             # Overdue (e.g. the server was down past a slot): the job is
             # due now, so never report a next run in the past — daily
             # and once jobs already clamp the same way.
@@ -330,8 +345,12 @@ class Scheduler:
             except (KeyError, ValueError):
                 return None
             return now if when <= now else when
-        hh, mm = (int(x) for x in job["at"].split(":"))
-        candidate = datetime.combine(now.date(), time(hh, mm))
+        try:
+            hh, mm = (int(x) for x in job["at"].split(":"))
+            slot = time(hh, mm)
+        except (KeyError, ValueError, AttributeError, TypeError):
+            return None  # malformed job: no next run, no crash
+        candidate = datetime.combine(now.date(), slot)
         if last is not None and last.date() == now.date():
             return candidate + timedelta(days=1)
         if candidate <= now:
