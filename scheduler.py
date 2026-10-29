@@ -151,9 +151,38 @@ class Scheduler:
                 return True
         return False
 
+    def rename(self, job_id, name):
+        """Rename a job. The id, schedule and run history are untouched,
+        so renaming never loses a check's history or changes when it
+        runs. Returns True if the job exists. Raises ValueError on a
+        blank name."""
+        name = " ".join(str(name).split())
+        if not name:
+            raise ValueError("task name is required")
+        for t in self._tasks:
+            if t["id"] == job_id:
+                t["name"] = name
+                self._save()
+                return True
+        return False
+
     def list_tasks(self):
         """All jobs, oldest first. Returns copies so callers can't mutate state."""
         return [dict(t) for t in self._tasks]
+
+    def tasks_with_next_run(self, now=None):
+        """list_tasks() plus a computed ``next_run`` ISO timestamp (or None).
+
+        Presentation only: the stored jobs are untouched, and a disabled
+        or already-fired job reports None, so no caller ever shows a
+        next run for something that will never run again."""
+        now = now or datetime.now()
+        out = []
+        for t in self.list_tasks():
+            nxt = self.next_run(t, now)
+            t["next_run"] = nxt.isoformat(timespec="seconds") if nxt else None
+            out.append(t)
+        return out
 
     # --- due logic --------------------------------------------------------
     @staticmethod
@@ -254,3 +283,35 @@ class Scheduler:
         if outcomes:
             self._save()
         return outcomes
+
+    def run_one(self, job_id, executor, now=None):
+        """Run one job right now, whether or not it is due or enabled.
+
+        A paused job stays paused after a manual run (this is a test
+        fire, not a resume), and a one-shot job is fired by it — it
+        switches off, exactly as a scheduled firing would, so it can
+        never run twice. Returns the outcome dict, or None if the id
+        is unknown. Executor failures are recorded, never raised.
+        """
+        now = now or datetime.now()
+        for job in self._tasks:
+            if job["id"] != job_id:
+                continue
+            job["last_run"] = now.isoformat(timespec="seconds")
+            job["run_count"] = job.get("run_count", 0) + 1
+            job["last_result"] = None
+            job["last_error"] = None
+            try:
+                job["last_result"] = str(executor(dict(job)))
+            except Exception as exc:  # noqa: BLE001 - recorded, not swallowed silently
+                job["last_error"] = f"{type(exc).__name__}: {exc}"
+            if job["kind"] == "once":
+                job["enabled"] = False  # manual run fires the one-shot
+            self._save()
+            return {
+                "id": job["id"],
+                "name": job["name"],
+                "result": job["last_result"],
+                "error": job["last_error"],
+            }
+        return None

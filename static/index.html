@@ -256,7 +256,7 @@ details.tool pre{font:12px/1.5 var(--mono);color:var(--dim);padding:0 13px 12px;
         <div class="setcard glass"><h3>Connections</h3><div class="mem" id="brief"><p class="empty-note">No check yet.</p></div>
           <button class="btn primary" id="briefnow" style="width:100%;margin-top:8px;padding:10px">Check connections now</button>
           <div class="mem" id="tasks" style="margin-top:10px"></div>
-          <form class="mrow" id="taskform"><input type="text" id="taskname" placeholder="Check name" autocomplete="off" value="Morning connection check"><input type="time" id="taskat" value="07:00"><button class="btn primary" style="padding:9px 14px">Daily check</button></form>
+          <form class="mrow" id="taskform"><input type="text" id="taskname" placeholder="Check name" autocomplete="off" value="Morning connection check"><select id="taskkind"><option value="daily">Daily</option><option value="interval">Every N min</option><option value="once">Once</option></select><input type="time" id="taskat" value="07:00"><input type="number" id="taskevery" placeholder="Minutes" min="1" value="15" style="display:none"><input type="date" id="taskdate" style="display:none"><select id="taskaction"><option value="connection-check">Connection check</option><option value="urgent-email-check">Urgent email check</option><option value="follow-up-nudges">Follow-up nudges</option></select><button class="btn primary" style="padding:9px 14px">Schedule check</button></form>
         </div>
         <div class="setcard glass"><h3>Tools</h3><div class="tools" id="tools"></div></div>
         <div class="setcard glass"><h3>Connectors</h3><div class="conns" id="conns"></div></div>
@@ -668,12 +668,17 @@ $('#briefnow').onclick=async()=>{ $('#briefnow').textContent='Checking…'; cons
 async function loadTasks(){
   try{
     const {tasks} = await (await fetch('/api/tasks')).json();
-    $('#tasks').innerHTML = tasks.length ? tasks.map(t=>{ const when = t.kind==='daily' ? 'daily at '+t.at : 'every '+t.every_minutes+' min'; return `<div><span>[${esc(t.id)}] ${esc(t.name)} — ${esc(when)} — ${t.enabled?'on':'off'}</span><button data-jid="${esc(t.id)}" aria-label="Delete">×</button></div>`; }).join('') : '<p class="empty-note">No scheduled checks.</p>';
-    $('#tasks').querySelectorAll('button').forEach(b=>b.onclick=async()=>{ await fetch('/api/tasks/'+encodeURIComponent(b.dataset.jid),{method:'DELETE'}); loadTasks(); });
+    $('#tasks').innerHTML = tasks.length ? tasks.map(t=>{ const when = t.kind==='daily' ? 'daily at '+t.at : t.kind==='once' ? 'once at '+t.at : 'every '+t.every_minutes+' min'; const next = t.next_run ? ' — next '+t.next_run : ''; const last = t.last_run ? ' — last '+t.last_run : ''; const outcome = t.last_error ? ' — error: '+String(t.last_error).slice(0,120) : (t.last_result ? ' — '+String(t.last_result).slice(0,120) : ''); return `<div><span>[${esc(t.id)}] ${esc(t.name)} — ${esc(when)} — ${t.enabled?'on':'off'}${esc(next)}${esc(last)}${esc(outcome)}</span><button data-jid="${esc(t.id)}" data-action="toggle" data-enabled="${t.enabled}" aria-label="${t.enabled?'Pause':'Resume'}">${t.enabled?'⏸':'▶'}</button><button data-jid="${esc(t.id)}" data-action="run" aria-label="Run now">Run now</button><button data-jid="${esc(t.id)}" data-action="rename" data-name="${esc(t.name)}" aria-label="Rename">✎</button><button data-jid="${esc(t.id)}" data-action="delete" aria-label="Delete">×</button></div>`; }).join('') : '<p class="empty-note">No scheduled checks.</p>';
+    $('#tasks').querySelectorAll('button').forEach(b=>b.onclick=async()=>{ if(b.dataset.action==='toggle'){ await fetch('/api/tasks/'+encodeURIComponent(b.dataset.jid),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:b.dataset.enabled!=='true'})}); } else if(b.dataset.action==='run'){ await fetch('/api/tasks/'+encodeURIComponent(b.dataset.jid)+'/run',{method:'POST'}); } else if(b.dataset.action==='rename'){ const name=prompt('Rename this check:', b.dataset.name); if(name && name.trim()){ await fetch('/api/tasks/'+encodeURIComponent(b.dataset.jid),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.trim()})}); } } else { await fetch('/api/tasks/'+encodeURIComponent(b.dataset.jid),{method:'DELETE'}); } loadTasks(); });
   }catch(e){}
 }
-$('#taskform').onsubmit=async e=>{ e.preventDefault(); const name=$('#taskname').value.trim(), at=$('#taskat').value; if(!name||!at) return;
-  const r = await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name, kind:'daily', at})});
+$('#taskkind').onchange=e=>{ const k=e.target.value; $('#taskat').style.display = k==='interval' ? 'none' : ''; $('#taskevery').style.display = k==='interval' ? '' : 'none'; $('#taskdate').style.display = k==='once' ? '' : 'none'; };
+$('#taskform').onsubmit=async e=>{ e.preventDefault(); const name=$('#taskname').value.trim(), kind=$('#taskkind').value, action=$('#taskaction').value; if(!name) return;
+  let payload = {name, kind, action};
+  if(kind==='daily'){ if(!$('#taskat').value) return; payload.at=$('#taskat').value; }
+  else if(kind==='interval'){ const m=parseInt($('#taskevery').value,10); if(!(m>=1)) return; payload.every_minutes=m; }
+  else { if(!$('#taskdate').value || !$('#taskat').value) return; payload.at=$('#taskdate').value+' '+$('#taskat').value; }
+  const r = await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   if(!r.ok){ const j = await r.json(); alert('Could not schedule: '+(j.error||r.status)); return; }
   loadTasks(); };
 /* --- Jump to latest (v0.3.2): show only when scrolled up --- */

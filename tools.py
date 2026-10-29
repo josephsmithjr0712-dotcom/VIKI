@@ -311,8 +311,11 @@ SPECS = {
     "update_profile": _spec("update_profile", "Save something lasting about the user to their profile: a like, dislike, hobby, favorite (needs favorite_key, e.g. 'coffee'), or note. Use when the user states a lasting preference. Never save secrets.", {"kind": S("like|dislike|hobby|favorite|note"), "value": S("e.g. 'black coffee' or 'quiet mornings'"), "favorite_key": S("for kind=favorite only, e.g. 'coffee'")}, ["kind", "value"]),
     "get_profile": _spec("get_profile", "Read the user's profile: likes, dislikes, hobbies, favorites, notes. Use it to tailor answers.", {}, []),
     "schedule_task": _spec("schedule_task", "Set up a check VIKI runs on her own (needs user approval). kind: 'daily' needs at='HH:MM' (24-hour); 'interval' needs every_minutes; 'once' needs at='YYYY-MM-DD HH:MM' and runs a single time, then turns itself off. action is currently 'connection-check' only: unread mail + today's calendar, saved as the latest brief.", {"name": S("e.g. 'morning connection check'"), "kind": S("daily|interval|once"), "action": S("'connection-check'"), "at": S("for daily: 'HH:MM'; for once: 'YYYY-MM-DD HH:MM'"), "every_minutes": S("for interval: minutes, 1 or more")}, ["name", "kind", "action"], risky=True),
-    "list_tasks": _spec("list_tasks", "List VIKI's scheduled checks: name, schedule, last run, last result.", {}, []),
+    "list_tasks": _spec("list_tasks", "List VIKI's scheduled checks: name, schedule, next run, last run, last result.", {}, []),
     "remove_task": _spec("remove_task", "Delete a scheduled check by its id (from list_tasks). Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
+    "toggle_task": _spec("toggle_task", "Pause or resume a scheduled check by its id (from list_tasks). Pausing keeps the check but stops it running; resuming turns it back on. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
+    "run_task_now": _spec("run_task_now", "Run a scheduled check right now by its id (from list_tasks), instead of waiting for its next slot. A paused check stays paused afterwards; a one-shot check is fired by this, so it will not run again later. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
+    "rename_task": _spec("rename_task", "Rename a scheduled check by its id (from list_tasks). The schedule and run history stay exactly as they were — only the name changes, so a typo in a name no longer means deleting and recreating the check. Needs user approval.", {"job_id": S("task id"), "name": S("new name")}, ["job_id", "name"], risky=True),
     "list_files": _spec("list_files", "List files in your workspace folder."),
     "read_file": _spec("read_file", "Read a text file from the workspace.", {"path": S("relative path")}, ["path"]),
     "write_file": _spec("write_file", "Create or overwrite a text file in the workspace (notes, drafts, reports). Needs user approval.",
@@ -478,6 +481,9 @@ class Toolbox:
                       "schedule_task": self._schedule_task,
                       "list_tasks": self._list_tasks,
                       "remove_task": self._remove_task,
+                      "toggle_task": self._toggle_task,
+                      "run_task_now": self._run_task_now,
+                      "rename_task": self._rename_task,
                       "update_plan": lambda steps: "Plan updated.",
                       "viki_check_update": viki_check_update,
                       "viki_apply_update": viki_apply_update}
@@ -512,7 +518,7 @@ class Toolbox:
         return f"Scheduled '{job['name']}' ({when}, id {job['id']})."
 
     def _list_tasks(self):
-        tasks = self.scheduler.list_tasks()
+        tasks = self.scheduler.tasks_with_next_run()
         if not tasks:
             return "No scheduled tasks."
         out = []
@@ -521,8 +527,15 @@ class Toolbox:
                 f"once at {t['at']}" if t["kind"] == "once" else \
                 f"every {t.get('every_minutes')} minutes"
             line = f"[{t['id']}] {t['name']} — {when} — {'on' if t.get('enabled') else 'off'}"
+            if t.get("next_run"):
+                line += f" — next run {t['next_run']}"
             if t.get("last_run"):
                 line += f" — last run {t['last_run']}"
+            if t.get("last_result"):
+                result = str(t["last_result"])
+                if len(result) > 200:
+                    result = result[:200].rstrip() + "…"
+                line += f" — last result: {result}"
             if t.get("last_error"):
                 line += f" — last error: {t['last_error']}"
             out.append(line)
@@ -530,6 +543,40 @@ class Toolbox:
 
     def _remove_task(self, job_id):
         return "Removed." if self.scheduler.remove(job_id) else "No task with that id."
+
+    def _toggle_task(self, job_id):
+        """Flip a job's enabled flag. Pausing keeps the check (and its
+        history) instead of deleting it; resuming turns it back on."""
+        for t in self.scheduler.list_tasks():
+            if t["id"] == job_id:
+                enabled = not t.get("enabled", True)
+                self.scheduler.set_enabled(job_id, enabled)
+                return f"{'Resumed' if enabled else 'Paused'} '{t['name']}'."
+        return "No task with that id."
+
+    def _rename_task(self, job_id, name):
+        """Rename a job without touching its schedule or history, so a
+        typo in a name doesn't mean deleting and recreating the check."""
+        for t in self.scheduler.list_tasks():
+            if t["id"] == job_id:
+                old = t["name"]
+                try:
+                    self.scheduler.rename(job_id, name)
+                except ValueError as e:
+                    return f"Could not rename that: {e}"
+                return f"Renamed '{old}' to '{' '.join(str(name).split())}'."
+        return "No task with that id."
+
+    def _run_task_now(self, job_id):
+        """Fire one job immediately through the connection check, and
+        report what it found. The scheduler records the outcome, so
+        the run shows up in list_tasks and on the web panel."""
+        outcome = self.scheduler.run_one(job_id, lambda job: connection_check())
+        if outcome is None:
+            return "No task with that id."
+        if outcome["error"]:
+            return f"Ran '{outcome['name']}' now — error: {outcome['error']}"
+        return f"Ran '{outcome['name']}' now — {outcome['result']}"
 
     def schemas(self):
         return [SPECS[n]["schema"] for n in self.enabled]

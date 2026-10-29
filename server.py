@@ -1,6 +1,9 @@
 """VIKI web server. Run: python server.py  then open http://localhost:7860"""
 import hmac
+import io
 import json, os, queue, secrets, threading, time, uuid
+import tempfile
+import wave
 from datetime import datetime, timedelta
 from pathlib import Path
 try:
@@ -484,7 +487,7 @@ def profile_api():
 
 @app.get("/api/tasks")
 def tasks_list():
-    return jsonify(tasks=task_scheduler.list_tasks())
+    return jsonify(tasks=task_scheduler.tasks_with_next_run())
 
 
 @app.post("/api/tasks")
@@ -514,6 +517,48 @@ def tasks_delete(jid):
     if not task_scheduler.remove(jid):
         return jsonify(error="task not found"), 404
     return jsonify(ok=True)
+
+
+@app.patch("/api/tasks/<jid>")
+def tasks_patch(jid):
+    """Pause/resume or rename a job from the web panel. Body may carry
+    {"enabled": bool} and/or {"name": str}; fields are validated before
+    anything is applied, so a bad body changes nothing."""
+    b = request.get_json(silent=True) or {}
+    has_enabled = "enabled" in b
+    has_name = "name" in b
+    if not has_enabled and not has_name:
+        return jsonify(error="nothing to update: pass enabled and/or name"), 400
+    if has_enabled and not isinstance(b.get("enabled"), bool):
+        return jsonify(error="enabled must be true or false"), 400
+    if has_name and not " ".join(str(b.get("name")).split()):
+        return jsonify(error="name must not be blank"), 400
+    if has_name:
+        try:
+            renamed = task_scheduler.rename(jid, b["name"])
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if not renamed:
+            return jsonify(error="task not found"), 404
+    if has_enabled and not task_scheduler.set_enabled(jid, b["enabled"]):
+        return jsonify(error="task not found"), 404
+    out = {"ok": True}
+    if has_enabled:
+        out["enabled"] = b["enabled"]
+    if has_name:
+        out["name"] = " ".join(str(b["name"]).split())
+    return jsonify(out)
+
+
+@app.post("/api/tasks/<jid>/run")
+def tasks_run_now(jid):
+    """Run one job right now from the web panel, through the same
+    executor as the scheduled tick, so the outcome is recorded and
+    the brief saved exactly like a scheduled run."""
+    outcome = task_scheduler.run_one(jid, _run_connection_job)
+    if outcome is None:
+        return jsonify(error="task not found"), 404
+    return jsonify(ok=True, outcome=outcome)
 
 
 @app.get("/api/brief")
@@ -669,6 +714,69 @@ def tts():
     except Exception as e:
         return jsonify(error=f"TTS failed: {e}"), 502
     return Response(audio, mimetype="audio/mpeg", headers={"Cache-Control": "no-cache"})
+
+
+# --- Speech-to-text for the Lenovo Smart Clock (v0.3.27) ---
+# The clock has no on-device recognizer, so it POSTs a 16 kHz mono WAV
+# here (see companion README, "Server contract: POST /api/transcribe").
+# faster-whisper is lazy-loaded (voice stack, requirements-voice.txt) so
+# the server still boots where it isn't installed; the endpoint then
+# answers 501 instead of crashing the whole server. Auth is the global
+# session-cookie check in _require_auth (unauthed -> 401).
+_transcribe_lock = threading.Lock()
+_transcribe_model = None
+_MAX_TRANSCRIBE_BYTES = 5 * 1024 * 1024  # a 30s clock utterance is ~1 MB
+
+
+def _get_transcribe_model():
+    global _transcribe_model
+    if _transcribe_model is None:
+        from faster_whisper import WhisperModel
+        _transcribe_model = WhisperModel(
+            os.getenv("VIKI_WHISPER", "base.en"),
+            device=os.getenv("VIKI_WHISPER_DEVICE", "cpu"),
+            compute_type=os.getenv("VIKI_WHISPER_COMPUTE", "int8"),
+        )
+    return _transcribe_model
+
+
+@app.post("/api/transcribe")
+def transcribe():
+    """Transcribe one WAV utterance. Returns {"text": "..."}; "" = no speech."""
+    data = request.get_data()
+    if not data:
+        return jsonify(error="empty audio"), 400
+    if len(data) > _MAX_TRANSCRIBE_BYTES:
+        return jsonify(error="audio too large"), 413
+    try:
+        with wave.open(io.BytesIO(data), "rb") as wav:
+            if wav.getnframes() == 0:
+                return jsonify(text="")
+    except Exception:
+        return jsonify(error="not a valid WAV file"), 400
+    try:
+        model = _get_transcribe_model()
+    except ImportError:
+        return jsonify(error="faster-whisper not installed: pip install -r requirements-voice.txt"), 501
+    except Exception as e:
+        return jsonify(error=f"transcription model failed to load: {e}"), 502
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+        with _transcribe_lock:
+            segments, _info = model.transcribe(tmp_path, beam_size=1, vad_filter=True)
+            text = " ".join(s.text for s in segments).strip()
+    except Exception as e:
+        return jsonify(error=f"transcription failed: {e}"), 502
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    return jsonify(text=text)
 
 
 @app.route("/api/memory", methods=["GET", "POST", "DELETE"])
