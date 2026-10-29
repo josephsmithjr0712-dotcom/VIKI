@@ -311,11 +311,15 @@ SPECS = {
     "update_profile": _spec("update_profile", "Save something lasting about the user to their profile: a like, dislike, hobby, favorite (needs favorite_key, e.g. 'coffee'), or note. Use when the user states a lasting preference. Never save secrets.", {"kind": S("like|dislike|hobby|favorite|note"), "value": S("e.g. 'black coffee' or 'quiet mornings'"), "favorite_key": S("for kind=favorite only, e.g. 'coffee'")}, ["kind", "value"]),
     "get_profile": _spec("get_profile", "Read the user's profile: likes, dislikes, hobbies, favorites, notes. Use it to tailor answers.", {}, []),
     "schedule_task": _spec("schedule_task", "Set up a check VIKI runs on her own (needs user approval). kind: 'daily' needs at='HH:MM' (24-hour); 'interval' needs every_minutes; 'once' needs at='YYYY-MM-DD HH:MM' and runs a single time, then turns itself off. action is currently 'connection-check' only: unread mail + today's calendar, saved as the latest brief.", {"name": S("e.g. 'morning connection check'"), "kind": S("daily|interval|once"), "action": S("'connection-check'"), "at": S("for daily: 'HH:MM'; for once: 'YYYY-MM-DD HH:MM'"), "every_minutes": S("for interval: minutes, 1 or more")}, ["name", "kind", "action"], risky=True),
-    "list_tasks": _spec("list_tasks", "List VIKI's scheduled checks: name, schedule, next run, last run, last result.", {}, []),
+    "list_tasks": _spec("list_tasks", "List VIKI's scheduled checks: name, schedule, action, run count, next run, last run, last result.", {}, []),
     "remove_task": _spec("remove_task", "Delete a scheduled check by its id (from list_tasks). Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
     "toggle_task": _spec("toggle_task", "Pause or resume a scheduled check by its id (from list_tasks). Pausing keeps the check but stops it running; resuming turns it back on. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
     "run_task_now": _spec("run_task_now", "Run a scheduled check right now by its id (from list_tasks), instead of waiting for its next slot. A paused check stays paused afterwards; a one-shot check is fired by this, so it will not run again later. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
     "rename_task": _spec("rename_task", "Rename a scheduled check by its id (from list_tasks). The schedule and run history stay exactly as they were — only the name changes, so a typo in a name no longer means deleting and recreating the check. Needs user approval.", {"job_id": S("task id"), "name": S("new name")}, ["job_id", "name"], risky=True),
+    "reschedule_task": _spec("reschedule_task", "Change when a scheduled check runs, by its id (from list_tasks), without deleting it. kind: 'daily' needs at='HH:MM'; 'interval' needs every_minutes; 'once' needs at='YYYY-MM-DD HH:MM'. The name and run history stay exactly as they were. Needs user approval.", {"job_id": S("task id"), "kind": S("daily|interval|once"), "at": S("for daily: 'HH:MM'; for once: 'YYYY-MM-DD HH:MM'"), "every_minutes": S("for interval: minutes, 1 or more")}, ["job_id", "kind"], risky=True),
+    "duplicate_task": _spec("duplicate_task", "Copy a scheduled check by its id (from list_tasks), so you can try a variation without recreating it by hand. The copy keeps the same schedule and action but starts with fresh history (no last run, zero runs) and is named '<name> (copy)'. Needs user approval.", {"job_id": S("task id")}, ["job_id"], risky=True),
+    "change_action_task": _spec("change_action_task", "Change what a scheduled check does, by its id (from list_tasks), without deleting it. action must be 'connection-check', 'urgent-email-check', or 'follow-up-nudges'. The name, schedule, and run history stay exactly as they were. Needs user approval.", {"job_id": S("task id"), "action": S("'connection-check'|'urgent-email-check'|'follow-up-nudges'")}, ["job_id", "action"], risky=True),
+    "clear_finished_tasks": _spec("clear_finished_tasks", "Clear finished one-shot checks from the list: one-shot checks that have already run can never run again, so they only clutter list_tasks. Pending one-shots and all recurring checks are kept. Needs user approval.", {}, [], risky=True),
     "list_files": _spec("list_files", "List files in your workspace folder."),
     "read_file": _spec("read_file", "Read a text file from the workspace.", {"path": S("relative path")}, ["path"]),
     "write_file": _spec("write_file", "Create or overwrite a text file in the workspace (notes, drafts, reports). Needs user approval.",
@@ -484,6 +488,10 @@ class Toolbox:
                       "toggle_task": self._toggle_task,
                       "run_task_now": self._run_task_now,
                       "rename_task": self._rename_task,
+                      "reschedule_task": self._reschedule_task,
+                      "duplicate_task": self._duplicate_task,
+                      "change_action_task": self._change_action_task,
+                      "clear_finished_tasks": self._clear_finished_tasks,
                       "update_plan": lambda steps: "Plan updated.",
                       "viki_check_update": viki_check_update,
                       "viki_apply_update": viki_apply_update}
@@ -527,6 +535,10 @@ class Toolbox:
                 f"once at {t['at']}" if t["kind"] == "once" else \
                 f"every {t.get('every_minutes')} minutes"
             line = f"[{t['id']}] {t['name']} — {when} — {'on' if t.get('enabled') else 'off'}"
+            if t.get("action"):
+                line += f" — action {t['action']}"
+            runs = int(t.get("run_count") or 0)
+            line += f" — {runs} run{'s' if runs != 1 else ''}"
             if t.get("next_run"):
                 line += f" — next run {t['next_run']}"
             if t.get("last_run"):
@@ -543,6 +555,16 @@ class Toolbox:
 
     def _remove_task(self, job_id):
         return "Removed." if self.scheduler.remove(job_id) else "No task with that id."
+
+    def _clear_finished_tasks(self):
+        """Drop fired one-shot checks from the list. Nothing that could
+        still run is touched, so this is safe to offer whenever the
+        list fills up with spent one-shots."""
+        removed = self.scheduler.prune_finished_once()
+        if not removed:
+            return "No finished one-shot checks to clear."
+        noun = "check" if removed == 1 else "checks"
+        return f"Cleared {removed} finished one-shot {noun}."
 
     def _toggle_task(self, job_id):
         """Flip a job's enabled flag. Pausing keeps the check (and its
@@ -565,6 +587,55 @@ class Toolbox:
                 except ValueError as e:
                     return f"Could not rename that: {e}"
                 return f"Renamed '{old}' to '{' '.join(str(name).split())}'."
+        return "No task with that id."
+
+    def _reschedule_task(self, job_id, kind, at=None, every_minutes=None):
+        """Change when a job runs without touching its name or history,
+        so a time change doesn't mean deleting and recreating the check."""
+        for t in self.scheduler.list_tasks():
+            if t["id"] == job_id:
+                try:
+                    minutes = int(every_minutes) if every_minutes not in (None, "") else None
+                except (TypeError, ValueError):
+                    return "every_minutes must be a whole number of minutes."
+                try:
+                    self.scheduler.reschedule(job_id, kind,
+                                              every_minutes=minutes, at=at or None)
+                except ValueError as e:
+                    return f"Could not reschedule that: {e}"
+                when = f"daily at {at}" if kind == "daily" else \
+                    f"once at {at}" if kind == "once" else \
+                    f"every {minutes} minutes"
+                return f"Rescheduled '{t['name']}' to {when}."
+        return "No task with that id."
+
+    def _duplicate_task(self, job_id):
+        """Copy a job with fresh history, so a variation of a check
+        doesn't have to be recreated by hand."""
+        original = None
+        for t in self.scheduler.list_tasks():
+            if t["id"] == job_id:
+                original = t["name"]
+                break
+        copy = self.scheduler.duplicate(job_id)
+        if copy is None:
+            return "No task with that id."
+        return (f"Duplicated '{original}' "
+                f"as '{copy['name']}' (id {copy['id']}).")
+
+    def _change_action_task(self, job_id, action):
+        """Change what a job does without touching its name, schedule,
+        or history, so switching a check's job doesn't mean deleting
+        and recreating it."""
+        for t in self.scheduler.list_tasks():
+            if t["id"] == job_id:
+                old = t.get("action", "")
+                try:
+                    self.scheduler.change_action(job_id, action)
+                except ValueError as e:
+                    return f"Could not change that check: {e}"
+                return (f"Changed '{t['name']}' from '{old}' "
+                        f"to '{' '.join(str(action).split())}'.")
         return "No task with that id."
 
     def _run_task_now(self, job_id):

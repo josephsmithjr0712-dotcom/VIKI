@@ -26,7 +26,7 @@ from chats import ChatStore, context_history
 from connectors.digest import connection_check
 from memory import SessionStore
 from profile import UserProfile
-from scheduler import Scheduler
+from scheduler import Scheduler, TASK_ACTIONS
 from tools import Toolbox, WORKSPACE, refresh_ha_entities, ha_entities_text
 from uploads import stage_files, discard, video_frames, read_text, UploadError, MAX_BYTES, MAX_FILES
 
@@ -498,7 +498,7 @@ def tasks_create():
     rejected so a typo can't silently create a job that never runs."""
     b = request.get_json(silent=True) or {}
     action = b.get("action") or "connection-check"
-    if action not in ("connection-check", "urgent-email-check", "follow-up-nudges"):
+    if action not in TASK_ACTIONS:
         return jsonify(error=f"unknown task action: {action!r}"), 400
     try:
         minutes = int(b["every_minutes"]) if b.get("every_minutes") not in (None, "") else None
@@ -519,20 +519,45 @@ def tasks_delete(jid):
     return jsonify(ok=True)
 
 
+@app.post("/api/tasks/prune-finished")
+def tasks_prune_finished():
+    """Clear fired one-shot jobs from the web panel, through the same
+    prune as the chat tool, so spent one-shots stop cluttering the
+    list. Returns how many were removed (0 is fine — nothing to do)."""
+    return jsonify(removed=task_scheduler.prune_finished_once())
+
+
 @app.patch("/api/tasks/<jid>")
 def tasks_patch(jid):
-    """Pause/resume or rename a job from the web panel. Body may carry
-    {"enabled": bool} and/or {"name": str}; fields are validated before
-    anything is applied, so a bad body changes nothing."""
+    """Pause/resume, rename, reschedule, or change the action of a job
+    from the web panel.
+    Body may carry {"enabled": bool}, {"name": str}, {"action": str},
+    and/or {"kind": str} with the matching every_minutes/at spec; all
+    fields are validated before anything is applied, so a bad body
+    changes nothing."""
     b = request.get_json(silent=True) or {}
     has_enabled = "enabled" in b
     has_name = "name" in b
-    if not has_enabled and not has_name:
-        return jsonify(error="nothing to update: pass enabled and/or name"), 400
+    has_action = "action" in b
+    has_kind = "kind" in b
+    if not has_enabled and not has_name and not has_action and not has_kind:
+        return jsonify(error="nothing to update: pass enabled, name, action and/or kind"), 400
     if has_enabled and not isinstance(b.get("enabled"), bool):
         return jsonify(error="enabled must be true or false"), 400
     if has_name and not " ".join(str(b.get("name")).split()):
         return jsonify(error="name must not be blank"), 400
+    if has_action and " ".join(str(b.get("action")).split()) not in TASK_ACTIONS:
+        return jsonify(error=f"unknown task action: {b.get('action')!r}"), 400
+    minutes = None
+    if has_kind:
+        try:
+            minutes = int(b["every_minutes"]) if b.get("every_minutes") not in (None, "") else None
+        except (TypeError, ValueError):
+            return jsonify(error="every_minutes must be a whole number"), 400
+        try:
+            task_scheduler.validate_spec(b.get("kind"), minutes, b.get("at"))
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
     if has_name:
         try:
             renamed = task_scheduler.rename(jid, b["name"])
@@ -540,14 +565,45 @@ def tasks_patch(jid):
             return jsonify(error=str(e)), 400
         if not renamed:
             return jsonify(error="task not found"), 404
+    if has_action:
+        try:
+            changed = task_scheduler.change_action(jid, b["action"])
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if not changed:
+            return jsonify(error="task not found"), 404
     if has_enabled and not task_scheduler.set_enabled(jid, b["enabled"]):
         return jsonify(error="task not found"), 404
+    if has_kind:
+        try:
+            rescheduled = task_scheduler.reschedule(jid, b["kind"],
+                                                    every_minutes=minutes,
+                                                    at=b.get("at"))
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if not rescheduled:
+            return jsonify(error="task not found"), 404
     out = {"ok": True}
     if has_enabled:
         out["enabled"] = b["enabled"]
     if has_name:
         out["name"] = " ".join(str(b["name"]).split())
+    if has_action:
+        out["action"] = " ".join(str(b["action"]).split())
+    if has_kind:
+        out["kind"] = b["kind"]
     return jsonify(out)
+
+
+@app.post("/api/tasks/<jid>/duplicate")
+def tasks_duplicate(jid):
+    """Copy one job from the web panel, through the same duplicate()
+    as the chat tool, so the copy keeps the schedule and action but
+    starts with fresh history."""
+    copy = task_scheduler.duplicate(jid)
+    if copy is None:
+        return jsonify(error="task not found"), 404
+    return jsonify(task=copy)
 
 
 @app.post("/api/tasks/<jid>/run")

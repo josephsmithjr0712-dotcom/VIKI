@@ -31,6 +31,12 @@ from pathlib import Path
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
+# Actions the scheduled-task executor knows how to run (see server.py
+# _run_connection_job). change_action() and the task endpoints validate
+# against this single list, so a typo can't silently create a job that
+# never runs.
+TASK_ACTIONS = ("connection-check", "urgent-email-check", "follow-up-nudges")
+
 
 def _atomic_write(path: Path, data: dict):
     """Write JSON to a temp file, then swap it in, so a crash can't corrupt the file."""
@@ -85,21 +91,22 @@ class Scheduler:
         )
 
     # --- managing jobs ----------------------------------------------------
-    def add(self, name, kind, action="", every_minutes=None, at=None):
-        """Add a job. Returns the job dict. Raises ValueError on bad input."""
-        name = " ".join(str(name).split())
-        if not name:
-            raise ValueError("task name is required")
+    @staticmethod
+    def validate_spec(kind, every_minutes=None, at=None):
+        """Return the stored spec dict for a kind, raising ValueError on
+        bad input. Shared by add() and reschedule() (and the PATCH route,
+        which validates before applying anything), so a schedule is
+        never half-validated in two places."""
         if kind == "interval":
             if not isinstance(every_minutes, (int, float)) or every_minutes < 1:
                 raise ValueError("interval tasks need every_minutes >= 1")
-            spec = {"every_minutes": int(every_minutes)}
-        elif kind == "daily":
+            return {"every_minutes": int(every_minutes)}
+        if kind == "daily":
             m = _TIME_RE.match(str(at or ""))
             if not m:
                 raise ValueError('daily tasks need at="HH:MM" (24-hour)')
-            spec = {"at": f"{m.group(1)}:{m.group(2)}"}
-        elif kind == "once":
+            return {"at": f"{m.group(1)}:{m.group(2)}"}
+        if kind == "once":
             # One-shot job: runs a single time at a full date+time, then
             # turns itself off (see run_due). Strict formats only, so a
             # typo can't silently create a job that never fires.
@@ -113,9 +120,15 @@ class Scheduler:
                     continue
             if when is None:
                 raise ValueError('once tasks need at="YYYY-MM-DD HH:MM"')
-            spec = {"at": when.strftime("%Y-%m-%d %H:%M")}
-        else:
-            raise ValueError(f"unknown task kind: {kind!r} (expected 'interval', 'daily' or 'once')")
+            return {"at": when.strftime("%Y-%m-%d %H:%M")}
+        raise ValueError(f"unknown task kind: {kind!r} (expected 'interval', 'daily' or 'once')")
+
+    def add(self, name, kind, action="", every_minutes=None, at=None):
+        """Add a job. Returns the job dict. Raises ValueError on bad input."""
+        name = " ".join(str(name).split())
+        if not name:
+            raise ValueError("task name is required")
+        spec = self.validate_spec(kind, every_minutes, at)
         job = {
             "id": f"{_slug(name)}-{uuid.uuid4().hex[:6]}",
             "name": name,
@@ -165,6 +178,77 @@ class Scheduler:
                 self._save()
                 return True
         return False
+
+    def reschedule(self, job_id, kind, every_minutes=None, at=None):
+        """Change a job's schedule in place. The id, name, action and
+        run history are untouched, so changing when a check runs no
+        longer means deleting it and recreating it. The new spec is
+        validated before anything is touched, so a bad schedule leaves
+        the old one exactly as it was. Returns True if the job exists.
+        Raises ValueError on a bad kind or spec. Note: last_run is
+        kept, so a daily job that already ran today and is rescheduled
+        to another time today will not re-fire until tomorrow."""
+        spec = self.validate_spec(kind, every_minutes, at)
+        for t in self._tasks:
+            if t["id"] == job_id:
+                t.pop("every_minutes", None)
+                t.pop("at", None)
+                t["kind"] = kind
+                t.update(spec)
+                self._save()
+                return True
+        return False
+
+    def duplicate(self, job_id):
+        """Copy a job under a new id. The schedule and action carry
+        over exactly, but the copy starts with fresh history (no last
+        run, zero runs) and the original is untouched — so trying a
+        variation of a check no longer means recreating it by hand.
+        Returns the new job dict, or None if the id is unknown."""
+        for t in self._tasks:
+            if t["id"] != job_id:
+                continue
+            copy = self.add(f"{t['name']} (copy)", t["kind"],
+                            action=t.get("action", ""),
+                            every_minutes=t.get("every_minutes"),
+                            at=t.get("at"))
+            if not t.get("enabled", True):
+                self.set_enabled(copy["id"], False)
+                copy["enabled"] = False
+            return copy
+        return None
+
+    def change_action(self, job_id, action):
+        """Change what a job does, in place. The id, name, schedule and
+        run history are untouched, so switching a check from e.g. the
+        connection check to the urgent-email check no longer means
+        deleting it and recreating it. Returns True if the job exists.
+        Raises ValueError on an unknown action."""
+        action = " ".join(str(action or "").split())
+        if action not in TASK_ACTIONS:
+            raise ValueError(f"unknown task action: {action!r} "
+                             f"(expected one of {', '.join(TASK_ACTIONS)})")
+        for t in self._tasks:
+            if t["id"] == job_id:
+                t["action"] = action
+                self._save()
+                return True
+        return False
+
+    def prune_finished_once(self):
+        """Remove one-shot jobs that have already fired, and return how
+        many were removed. A once job with a last_run can never run
+        again (see is_due), so it only clutters the list; pending
+        one-shots (no last_run yet) and every recurring job are kept,
+        even paused ones, because those may still run."""
+        before = len(self._tasks)
+        self._tasks = [t for t in self._tasks
+                       if not (t.get("kind") == "once"
+                               and t.get("last_run"))]
+        removed = before - len(self._tasks)
+        if removed:
+            self._save()
+        return removed
 
     def list_tasks(self):
         """All jobs, oldest first. Returns copies so callers can't mutate state."""
