@@ -317,7 +317,11 @@ class Scheduler:
         if job["kind"] == "interval":
             if last is None:
                 return now
-            return last + timedelta(minutes=job["every_minutes"])
+            candidate = last + timedelta(minutes=job["every_minutes"])
+            # Overdue (e.g. the server was down past a slot): the job is
+            # due now, so never report a next run in the past — daily
+            # and once jobs already clamp the same way.
+            return candidate if candidate > now else now
         if job["kind"] == "once":
             if last is not None:
                 return None  # already fired

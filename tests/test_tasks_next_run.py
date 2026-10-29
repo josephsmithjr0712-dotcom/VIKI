@@ -54,6 +54,28 @@ class TestTasksWithNextRun(unittest.TestCase):
         tasks = s.tasks_with_next_run(now=NOW)
         self.assertEqual(tasks[0]["next_run"], "2026-10-28T08:30:00")
 
+    def test_interval_overdue_next_run_is_now_not_past(self):
+        # Last run 06:00, every 60 minutes, now 08:00: the computed slot
+        # (07:00) is already past and the job is due — the panel and
+        # chat must show "now", not a stale time in the past.
+        s = fresh()
+        s.add("Poll", "interval", every_minutes=60)
+        s.run_due(lambda j: "ok", now=datetime(2026, 10, 28, 6, 0))
+        tasks = s.tasks_with_next_run(now=NOW)
+        self.assertEqual(tasks[0]["next_run"], "2026-10-28T08:00:00")
+        self.assertTrue(s.is_due(tasks[0], now=NOW))
+
+    def test_interval_overdue_by_many_slots_next_run_is_now(self):
+        # Missed several slots (e.g. server down): still "now", and the
+        # stored last_run is untouched — next_run is presentation only.
+        s = fresh()
+        s.add("Poll", "interval", every_minutes=15)
+        s.run_due(lambda j: "ok", now=datetime(2026, 10, 28, 6, 0))
+        tasks = s.tasks_with_next_run(now=NOW)
+        self.assertEqual(tasks[0]["next_run"], "2026-10-28T08:00:00")
+        self.assertEqual(s.list_tasks()[0]["last_run"],
+                         "2026-10-28T06:00:00")
+
     def test_disabled_job_reports_none(self):
         s = fresh()
         job = s.add("Off", "daily", at="09:00")
