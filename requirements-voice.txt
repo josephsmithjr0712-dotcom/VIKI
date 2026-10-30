@@ -3,6 +3,11 @@
 # (the web UI's browser mic keeps working without any of this).
 openwakeword>=0.6      # wake-word detection ("hey jarvis" built in)
 faster-whisper>=1.0    # speech to text, fast on CPU
+av>=11,<19            # faster-whisper 1.2.1 passes metadata_errors to
+                      # av.open(); PyAV 19 removed that argument, so an
+                      # unpinned install breaks /api/transcribe with a 502
+                      # (clock voice uploads fail). Re-check the cap when
+                      # faster-whisper bounds av itself.
 piper-tts>=1.2         # neural text to speech, local
 sounddevice>=0.4       # mic + speaker I/O (needs portaudio on the system)
 soundfile>=0.12        # wav playback helper
