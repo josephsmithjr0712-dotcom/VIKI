@@ -270,7 +270,12 @@ class VIKI:
         while True:
             kw = dict(model=self.model, messages=messages, stream=True, options={"temperature": 0.2, "top_p": 0.9})
             if tools: kw["tools"] = tools
-            if think: kw["think"] = True
+            # Always send think explicitly (v0.3.37): omitting it let the
+            # model default win, and qwen3 defaults thinking ON — so a
+            # turn with reasoning off still paid for a long reasoning
+            # trace before answering. think=False here is a no-op for
+            # models without thinking support.
+            kw["think"] = think
             content, thinking, calls = [], [], []
             try:
                 for chunk in self.client.chat(**kw):
