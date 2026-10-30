@@ -73,6 +73,53 @@ def make_viki(client, tmp):
     return v
 
 
+class FakeChunk:
+    def __init__(self, message):
+        self.message = message
+
+
+class ChunkClient:
+    """Yields scripted message chunks, recording chat kwargs."""
+
+    def __init__(self, messages):
+        self.messages = list(messages)
+        self.kwargs = []
+
+    def chat(self, **kw):
+        self.kwargs.append(kw)
+        return [FakeChunk(m) for m in self.messages]
+
+
+class TestThinkStrip(unittest.TestCase):
+    def test_strips_block(self):
+        filt = agent_mod._ThinkFilter()
+        self.assertEqual(filt.feed("Hi <think>reasoning here</think>there"), "Hi there")
+
+    def test_split_tags_across_chunks(self):
+        filt = agent_mod._ThinkFilter()
+        out = filt.feed("Hi <th") + filt.feed("ink>secret</th") + filt.feed("ink> boss")
+        self.assertEqual(out, "Hi  boss")
+        self.assertNotIn("secret", out)
+
+    def test_unclosed_think_dropped(self):
+        filt = agent_mod._ThinkFilter()
+        self.assertEqual(filt.feed("Answer <think>never closed"), "Answer ")
+        filt.flush()
+        self.assertEqual(filt.feed(" done"), " done")
+
+    def test_run_never_emits_think_tokens(self):
+        client = ChunkClient([FakeMsg(content="<think>deliberation</think>Hey boss!")])
+        v = make_viki(client, Path(tempfile.mkdtemp()))
+        events = []
+        out = v.run("hello", [], [], lambda k, p: events.append((k, p)),
+                    lambda cid, n, a: True, think=False,
+                    cancel=threading.Event())
+        self.assertEqual(out["content"], "Hey boss!")
+        tokens = "".join(p for k, p in events if k == "token")
+        self.assertNotIn("deliberation", tokens)
+        self.assertEqual(tokens, "Hey boss!")
+
+
 class TestThinkOff(unittest.TestCase):
     def test_think_false_sent_explicitly(self):
         client = RecordingClient()

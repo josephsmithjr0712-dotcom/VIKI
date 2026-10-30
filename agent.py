@@ -91,6 +91,59 @@ def _args_key(args):
         return repr(sorted((str(k), str(v)) for k, v in args.items()))
 
 
+class _ThinkFilter:
+    """Stateful stripper for <think>...</think> leaked into answer text (v0.3.38).
+
+    The clock speaks content tokens and ignores the thinking channel, so
+    reasoning that Ollama puts into the content stream — which happens
+    even with think=False on some servers/models — would be spoken aloud.
+    feed() returns only answer text, holding back a tail that could be a
+    tag split across chunks; flush() drops an unclosed <think> block at
+    stream end rather than leaking partial reasoning.
+    """
+
+    def __init__(self):
+        self.in_think = False
+        self.buf = ""
+
+    def feed(self, text):
+        self.buf += text or ""
+        out = []
+        while True:
+            if self.in_think:
+                end = self.buf.find("</think>")
+                if end == -1:
+                    keep = 0
+                    for n in range(min(len(self.buf), 7), 0, -1):
+                        if "</think>"[:n] == self.buf[-n:]:
+                            keep = n
+                            break
+                    self.buf = self.buf[-keep:] if keep else ""
+                    break
+                self.buf = self.buf[end + len("</think>"):]
+                self.in_think = False
+                continue
+            start = self.buf.find("<think>")
+            if start == -1:
+                keep = 0
+                for n in range(min(len(self.buf), 6), 0, -1):
+                    if "<think>"[:n] == self.buf[-n:]:
+                        keep = n
+                        break
+                out.append(self.buf[:-keep] if keep else self.buf)
+                self.buf = self.buf[-keep:] if keep else ""
+                break
+            out.append(self.buf[:start])
+            self.buf = self.buf[start + len("<think>"):]
+            self.in_think = True
+        return "".join(out)
+
+    def flush(self):
+        self.buf = ""
+        self.in_think = False
+        return ""
+
+
 # Cloud-model option (v0.3.18): when VIKI_CLOUD_MODEL, VIKI_CLOUD_BASE_URL
 # and VIKI_CLOUD_API_KEY are all set, model turns go to an OpenAI-compatible
 # chat-completions endpoint instead of local Ollama. Any cloud failure falls
@@ -209,6 +262,7 @@ class VIKI:
                      "Authorization": "Bearer " + cfg["api_key"]},
             method="POST")
         content, parts, order = [], {}, []
+        filt = _ThinkFilter()
         with urllib.request.urlopen(req, timeout=cfg["timeout"]) as resp:
             for raw in resp:
                 if cancel.is_set():
@@ -222,8 +276,10 @@ class VIKI:
                 chunk = json.loads(data)  # raises on bad payload -> fallback
                 delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
                 if delta.get("content"):
-                    content.append(delta["content"])
-                    emit("token", delta["content"])
+                    clean = filt.feed(delta["content"])
+                    if clean:
+                        content.append(clean)
+                        emit("token", clean)
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0)
                     if idx not in parts:
@@ -277,6 +333,7 @@ class VIKI:
             # models without thinking support.
             kw["think"] = think
             content, thinking, calls = [], [], []
+            filt = _ThinkFilter()
             try:
                 for chunk in self.client.chat(**kw):
                     if cancel.is_set(): raise Cancelled()
@@ -284,8 +341,11 @@ class VIKI:
                     if getattr(m, "thinking", None):
                         thinking.append(m.thinking); emit("thinking", m.thinking)
                     if m.content:
-                        content.append(m.content); emit("token", m.content)
+                        clean = filt.feed(m.content)
+                        if clean:
+                            content.append(clean); emit("token", clean)
                     if m.tool_calls: calls.extend(m.tool_calls)
+                filt.flush()
                 return "".join(content), "".join(thinking), calls
             except ollama.ResponseError as e:
                 err = str(e).lower()
