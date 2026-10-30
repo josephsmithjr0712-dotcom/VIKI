@@ -151,14 +151,34 @@ class _ThinkFilter:
 # ever sent in the Authorization header, never logged, printed, or put in a
 # URL. It lives in the server .env, never in code. Tool schemas pass
 # through unchanged: local schemas already use OpenAI's function format.
+# Gemini shortcut (v0.3.39): a gemini-* model needs no base URL — the
+# Google OpenAI-compatible endpoint is the default, keyed by
+# VIKI_GEMINI_API_KEY (or VIKI_CLOUD_API_KEY).
+_GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+
 def _cloud_config():
     """Cloud config from env, or None when not fully set.
 
-    Empty values count as unset, so a half-configured .env stays local.
-    Timeout is seconds per HTTP read (VIKI_CLOUD_TIMEOUT, default 60)."""
-    model = (os.getenv("VIKI_CLOUD_MODEL") or "").strip()
+    Generic OpenAI-compatible endpoint: VIKI_CLOUD_MODEL +
+    VIKI_CLOUD_BASE_URL + VIKI_CLOUD_API_KEY.
+
+    Gemini shortcut (v0.3.39): Google's Gemini API exposes an
+    OpenAI-compatible endpoint, so a Gemini model needs no base URL —
+    set VIKI_GEMINI_API_KEY (from Google AI Studio, kept in server .env
+    only, never in chat) and VIKI_CLOUD_MODEL (or VIKI_GEMINI_MODEL) to
+    e.g. gemini-2.5-flash (fast, best for voice) or gemini-2.5-pro
+    (smarter, slower). An explicit VIKI_CLOUD_BASE_URL always wins, so
+    a proxy or Vertex AI endpoint can still be used. VIKI_CLOUD_API_KEY
+    is accepted as the key for a Gemini model too. Empty values count
+    as unset, so a half-configured .env stays local. Timeout is seconds
+    per HTTP read (VIKI_CLOUD_TIMEOUT, default 60). The key is only
+    ever sent in the Authorization header, never logged or in a URL."""
+    model = (os.getenv("VIKI_CLOUD_MODEL") or os.getenv("VIKI_GEMINI_MODEL") or "").strip()
     base = (os.getenv("VIKI_CLOUD_BASE_URL") or "").strip().rstrip("/")
-    key = (os.getenv("VIKI_CLOUD_API_KEY") or "").strip()
+    key = (os.getenv("VIKI_CLOUD_API_KEY") or os.getenv("VIKI_GEMINI_API_KEY") or "").strip()
+    if not base and model.lower().startswith("gemini-"):
+        base = _GEMINI_OPENAI_BASE_URL
     if not (model and base and key):
         return None
     try:
