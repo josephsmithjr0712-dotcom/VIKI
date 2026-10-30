@@ -125,15 +125,22 @@ def _pick_player(server, name):
 
 
 def _maybe_launch_plex_on_roku(player_title):
-    """If HA is connected and the player looks like a Roku, open the Plex app."""
+    """If HA is connected and the player looks like a Roku, open the Plex app.
+
+    Returns None on success (or when no launch is needed), else a
+    short failure note for the caller to surface — a failed launch
+    must not silently read as "Playing"."""
     if "roku" not in player_title.lower():
-        return
+        return None
     try:
         from connectors import roku as roku_mod
         if roku_mod.ha_connected():
-            roku_mod.roku_launch("Plex")
-    except Exception:
-        pass
+            result = roku_mod.roku_launch("Plex")
+            if isinstance(result, str) and ("failed" in result or "No Roku" in result):
+                return result
+    except Exception as e:
+        return f"could not open Plex on the Roku ({type(e).__name__})"
+    return None
 
 
 def plex_play(title, player=""):
@@ -148,9 +155,12 @@ def plex_play(title, player=""):
             return f"No Plex matches for '{t}'."
         item = results[0]
         client = _pick_player(server, p)
-        _maybe_launch_plex_on_roku(client.title)
+        launch_note = _maybe_launch_plex_on_roku(client.title)
         item.play(client)
-        return f"Playing '{_describe(item)}' on {client.title}."
+        msg = f"Playing '{_describe(item)}' on {client.title}."
+        if launch_note:
+            msg += f" Note: {launch_note}"
+        return msg
     return _run(go)
 
 

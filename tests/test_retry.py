@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -117,15 +117,21 @@ class TestRetryBehaviour(unittest.TestCase):
             ("raise", ConnectionError("reset by peer")),
             ("chunks", [FakeMsg(content="recovered")]),
         ], self.tmp)
-        with patch.object(agent_mod, "time") as mock_time:
-            out, events = run_loop(v, "hi")
+        # Retry sleeps go through cancel.wait (sliced, Stop-aware), not
+        # time.sleep: a mock cancel records the backoff without waiting.
+        cancel = MagicMock()
+        cancel.wait.return_value = False
+        cancel.is_set.return_value = False
+        events = []
+        out = v.run("hi", [], [], lambda k, p: events.append((k, p)),
+                    lambda cid, n, a: True, think=False, cancel=cancel)
         self.assertEqual(out["type"], "text")
         self.assertEqual(out["content"], "recovered")
         self.assertEqual(v.client.calls, 3)
         retry_statuses = [p for k, p in events if k == "status" and "retrying" in str(p)]
         self.assertEqual(len(retry_statuses), 2)
         # exponential backoff: 1.0, then 2.0
-        self.assertEqual([c.args[0] for c in mock_time.sleep.call_args_list], [1.0, 2.0])
+        self.assertEqual([c.args[0] for c in cancel.wait.call_args_list], [1.0, 2.0])
 
     def test_retries_exhausted_surfaces_error(self):
         v = make_viki([

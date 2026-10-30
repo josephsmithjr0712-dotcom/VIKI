@@ -95,7 +95,7 @@ _GEOCODE_CACHE_MAX = 200
 _CACHE_FILE = (
     Path(os.environ["VIKI_GEOCODE_CACHE_FILE"])
     if os.environ.get("VIKI_GEOCODE_CACHE_FILE")
-    else Path(__file__).resolve().parent.parent / "workspace" / "geocode_cache.json"
+    else Path(os.getenv("VIKI_WORKSPACE") or Path(__file__).resolve().parent.parent / "workspace") / "geocode_cache.json"
 )
 _CACHE_LOADED = False
 

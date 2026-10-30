@@ -12,20 +12,26 @@ import urllib.parse
 import urllib.request
 
 API = "https://api.github.com"
-TOKEN = os.getenv("GITHUB_TOKEN", "")
 UA = {"User-Agent": "Mozilla/5.0 (VIKI agent)"}
 
 
+def _token():
+    # Read at call time, not import time: a token added after the
+    # server started must work without a restart.
+    return os.getenv("GITHUB_TOKEN", "")
+
+
 def token_exists() -> bool:
-    return bool(TOKEN)
+    return bool(_token())
 
 
 def _api(path: str, method: str = "GET", data: dict | None = None):
     """Call the GitHub API. Returns (ok, parsed_json_or_error_string)."""
-    if not TOKEN:
+    token = _token()
+    if not token:
         return False, "GitHub is not connected. Set GITHUB_TOKEN in the environment first."
     headers = dict(UA)
-    headers["Authorization"] = f"Bearer {TOKEN}"
+    headers["Authorization"] = f"Bearer {token}"
     headers["Accept"] = "application/vnd.github+json"
     body = json.dumps(data).encode() if data is not None else None
     req = urllib.request.Request(API + path, data=body, headers=headers, method=method)

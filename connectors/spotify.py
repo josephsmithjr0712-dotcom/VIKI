@@ -24,7 +24,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CACHE = HERE / ".spotify_cache"
 SCOPES = "user-read-playback-state user-modify-playback-state user-read-currently-playing"
-REDIRECT = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
+
+
+def _redirect():
+    # Read at call time, not import time: a redirect URI changed after
+    # the server started must take effect without a restart.
+    return os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
 
 
 def connected() -> bool:
@@ -46,7 +51,7 @@ def _sp():
     auth = SpotifyOAuth(
         client_id=os.getenv("SPOTIFY_CLIENT_ID"),
         client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
-        redirect_uri=REDIRECT,
+        redirect_uri=_redirect(),
         scope=SCOPES,
         cache_path=str(CACHE),
         open_browser=False,
@@ -203,15 +208,18 @@ def spotify_now_playing():
     return _run(go)
 
 
-def spotify_volume(percent):
-    def go(p=percent):
+def spotify_volume(percent, device=""):
+    # Finding 30, second half (judgment call): an optional device
+    # name, matched the same substring way as spotify_play does.
+    # Empty means the active device, exactly as before.
+    def go(p=percent, d=device):
         sp = _sp()
         try:
             p = int(p)
         except (TypeError, ValueError):
             return "Volume must be 0-100."
         p = max(0, min(100, p))
-        dev = _pick_device(sp, "")
+        dev = _pick_device(sp, d)
         sp.volume(p, device_id=dev["id"])
         return f"Volume set to {p}% on {dev['name']}."
     return _run(go)

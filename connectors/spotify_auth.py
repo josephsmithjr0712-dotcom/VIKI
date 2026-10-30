@@ -23,10 +23,10 @@ def main():
         print("Create an app at https://developer.spotify.com/dashboard")
         raise SystemExit(1)
     from spotipy.oauth2 import SpotifyOAuth
-    from connectors.spotify import SCOPES, REDIRECT, CACHE
+    from connectors.spotify import SCOPES, CACHE, _redirect
 
     auth = SpotifyOAuth(
-        client_id=cid, client_secret=secret, redirect_uri=REDIRECT,
+        client_id=cid, client_secret=secret, redirect_uri=_redirect(),
         scope=SCOPES, cache_path=str(CACHE), open_browser=True,
     )
     token = auth.get_access_token(as_dict=False)

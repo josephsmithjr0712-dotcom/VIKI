@@ -11,6 +11,15 @@ Job kinds:
     interval: run every N minutes (``every_minutes`` >= 1)
     daily:    run once a day at a wall-clock time (``at`` == "HH:MM")
 
+Finding 34 (judgment call, flagged for veto): all stored times are
+naive local wall-clock times, deliberately. A daily job always fires
+at its wall-clock slot, even across a DST transition (the slot is
+recomputed from the current date each tick). An interval job measures
+wall-clock minutes, so across a DST transition its next firing may
+shift by the transition offset once — accepted as the cost of
+wall-clock storage; absolute-time (UTC) storage was rejected because
+it would make daily slots drift from the wall-clock time Joey set.
+
 Storage: ``<folder>/tasks.json`` (folder from the constructor, the
 ``VIKI_SCHEDULER_DIR`` env var, or ``<repo>/scheduler`` by default).
 Writes are atomic (temp file + replace) like the memory store, and a
@@ -98,8 +107,13 @@ class Scheduler:
         which validates before applying anything), so a schedule is
         never half-validated in two places."""
         if kind == "interval":
-            if not isinstance(every_minutes, (int, float)) or every_minutes < 1:
-                raise ValueError("interval tasks need every_minutes >= 1")
+            # bool is an int subclass, and a non-integral float would
+            # silently truncate (2.5 -> 2): reject both outright.
+            if (isinstance(every_minutes, bool)
+                    or not isinstance(every_minutes, (int, float))
+                    or every_minutes < 1
+                    or (isinstance(every_minutes, float) and not every_minutes.is_integer())):
+                raise ValueError("interval tasks need every_minutes >= 1 (whole minutes)")
             return {"every_minutes": int(every_minutes)}
         if kind == "daily":
             m = _TIME_RE.match(str(at or ""))
@@ -124,10 +138,17 @@ class Scheduler:
         raise ValueError(f"unknown task kind: {kind!r} (expected 'interval', 'daily' or 'once')")
 
     def add(self, name, kind, action="", every_minutes=None, at=None):
-        """Add a job. Returns the job dict. Raises ValueError on bad input."""
+        """Add a job. Returns the job dict. Raises ValueError on bad input.
+        A blank action means connection-check (the historical default);
+        any other action must be one of TASK_ACTIONS, so a typo can't
+        create a job the executors will never run."""
         name = " ".join(str(name).split())
         if not name:
             raise ValueError("task name is required")
+        action = " ".join(str(action or "").split())
+        if action and action not in TASK_ACTIONS:
+            raise ValueError(f"unknown task action: {action!r} "
+                             f"(expected one of {', '.join(TASK_ACTIONS)})")
         spec = self.validate_spec(kind, every_minutes, at)
         job = {
             "id": f"{_slug(name)}-{uuid.uuid4().hex[:6]}",
@@ -187,7 +208,10 @@ class Scheduler:
         the old one exactly as it was. Returns True if the job exists.
         Raises ValueError on a bad kind or spec. Note: last_run is
         kept, so a daily job that already ran today and is rescheduled
-        to another time today will not re-fire until tomorrow."""
+        to another time today will not re-fire until tomorrow — except
+        a fired one-shot: rescheduling it clears last_run and switches
+        it back on, so the new slot actually fires instead of staying
+        dead."""
         spec = self.validate_spec(kind, every_minutes, at)
         for t in self._tasks:
             if t["id"] == job_id:
@@ -195,6 +219,9 @@ class Scheduler:
                 t.pop("at", None)
                 t["kind"] = kind
                 t.update(spec)
+                if kind == "once":
+                    t["last_run"] = None
+                    t["enabled"] = True
                 self._save()
                 return True
         return False
@@ -204,6 +231,10 @@ class Scheduler:
         over exactly, but the copy starts with fresh history (no last
         run, zero runs) and the original is untouched — so trying a
         variation of a check no longer means recreating it by hand.
+        Note: the copy inherits the original's enabled flag, so a copy
+        of a disabled job — including a fired one-shot, which switches
+        itself off — starts disabled (enabled=False) and must be
+        resumed before it can run, even though its history is fresh.
         Returns the new job dict, or None if the id is unknown."""
         for t in self._tasks:
             if t["id"] != job_id:
@@ -275,9 +306,15 @@ class Scheduler:
         if not raw:
             return None
         try:
-            return datetime.fromisoformat(raw)
-        except ValueError:
+            dt = datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
             return None
+        if dt.tzinfo is not None:
+            # A timezone-stamped last_run (e.g. written by another tool)
+            # must not crash naive comparisons: normalise to naive
+            # local time. An unparseable value means "never ran".
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
 
     def is_due(self, job, now=None):
         """True if an enabled job should run at `now` (default: right now)."""
@@ -290,7 +327,8 @@ class Scheduler:
             # non-numeric every_minutes; never let one bad job crash the
             # whole tick — it simply never fires.
             every = job.get("every_minutes")
-            if not isinstance(every, (int, float)) or every < 1:
+            if (isinstance(every, bool) or not isinstance(every, (int, float))
+                    or every < 1):
                 return False
             if last is None:
                 return True  # brand-new job runs once right away
@@ -328,7 +366,8 @@ class Scheduler:
             # Same malformed-job guard as is_due: a bad spec reports no
             # next run instead of crashing the task list.
             every = job.get("every_minutes")
-            if not isinstance(every, (int, float)) or every < 1:
+            if (isinstance(every, bool) or not isinstance(every, (int, float))
+                    or every < 1):
                 return None
             if last is None:
                 return now
@@ -375,6 +414,10 @@ class Scheduler:
             job["run_count"] = job.get("run_count", 0) + 1
             job["last_result"] = None
             job["last_error"] = None
+            # Persist the claim immediately: if the executor crashes the
+            # process mid-tick, the run is still recorded and won't
+            # re-fire on the next tick.
+            self._save()
             try:
                 job["last_result"] = str(executor(dict(job)))
             except Exception as exc:  # noqa: BLE001 - recorded, not swallowed silently
@@ -387,7 +430,6 @@ class Scheduler:
                 "result": job["last_result"],
                 "error": job["last_error"],
             })
-        if outcomes:
             self._save()
         return outcomes
 
@@ -399,12 +441,22 @@ class Scheduler:
         switches off, exactly as a scheduled firing would, so it can
         never run twice. Returns the outcome dict, or None if the id
         is unknown. Executor failures are recorded, never raised.
+
+        Finding 14 (judgment call, flagged for veto): what a manual
+        run does to last_run depends on kind. A daily job's slot is
+        wall-clock time, so a manual test fire does NOT stamp
+        last_run — the job still fires at its slot later (otherwise
+        testing the morning brief at 5pm would silently eat that
+        day's scheduled run). An interval job's schedule is "every N
+        minutes since the last run", so a manual run DOES reset that
+        clock. A one-shot job is consumed by any run, manual or not.
         """
         now = now or datetime.now()
         for job in self._tasks:
             if job["id"] != job_id:
                 continue
-            job["last_run"] = now.isoformat(timespec="seconds")
+            if job["kind"] != "daily":
+                job["last_run"] = now.isoformat(timespec="seconds")
             job["run_count"] = job.get("run_count", 0) + 1
             job["last_result"] = None
             job["last_error"] = None

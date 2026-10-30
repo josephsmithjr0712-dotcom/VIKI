@@ -17,6 +17,7 @@ Tools:
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 
 # Remote keys supported by the HA Roku integration (docs) + Lit_ typing.
@@ -46,38 +47,86 @@ def _ha():
     return base, token
 
 
-def _service(domain: str, service: str, data: dict):
-    base, token = _ha()
-    req = urllib.request.Request(
-        f"{base}/api/services/{domain}/{service}",
-        data=json.dumps(data).encode(),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+def _ha_bases():
+    """HA base URLs in try order (finding 54: HA_URL, then HA_URL_FALLBACKS)."""
+    bases = [os.getenv("HA_URL", "").rstrip("/")]
+    bases += [b.strip().rstrip("/") for b in
+              os.getenv("HA_URL_FALLBACKS", "").split(",") if b.strip()]
+    return [b for b in bases if b]
+
+
+def _open(build, timeout):
+    """Open a request built per base, falling through bases on connection errors only.
+
+    An HTTP response (even an error) means HA answered — retrying on
+    another host could double-actuate a service call, so it raises.
+    """
+    last = None
+    for base in _ha_bases():
+        try:
+            with urllib.request.urlopen(build(base), timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError) as e:
+            last = e
+    if last is not None:
+        raise last
+    raise RuntimeError(
+        "Home Assistant is not connected. Set HA_URL and HA_TOKEN in .env, "
+        "and add the Roku integration in Home Assistant."
     )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.load(r)
+
+
+def _service(domain: str, service: str, data: dict):
+    _, token = _ha()
+    try:
+        return _open(lambda base: urllib.request.Request(
+            f"{base}/api/services/{domain}/{service}",
+            data=json.dumps(data).encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        ), timeout=15)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            reset_cache()
+        raise
 
 
 def _state(entity_id: str) -> dict:
-    base, token = _ha()
-    req = urllib.request.Request(
-        f"{base}/api/states/{entity_id}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.load(r)
+    _, token = _ha()
+    try:
+        return _open(lambda base: urllib.request.Request(
+            f"{base}/api/states/{entity_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        ), timeout=10)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # The cached entity is gone (renamed/deleted): drop the
+            # cache so the next call re-discovers instead of failing
+            # the same way until restart.
+            reset_cache()
+        raise
 
 
 def _entities():
-    """(media_player entity, remote entity) — auto-discovered, cached per process."""
+    """(media_player entity, remote entity) — auto-discovered, cached per process.
+
+    A missing remote is NOT cached: caching (entity, None) would pin the
+    "no remote" answer until restart even after the remote appears. A
+    404 from Home Assistant drops any cached pair, since the entities
+    it names may no longer exist."""
     global _entities_cache
     if _entities_cache:
         return _entities_cache
-    base, token = _ha()
-    req = urllib.request.Request(
-        f"{base}/api/states", headers={"Authorization": f"Bearer {token}"}
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        states = json.load(r)
+    _, token = _ha()
+    try:
+        states = _open(lambda base: urllib.request.Request(
+            f"{base}/api/states", headers={"Authorization": f"Bearer {token}"}
+        ), timeout=10)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            _entities_cache = None
+        raise
     mp = [s["entity_id"] for s in states
           if s["entity_id"].startswith("media_player.") and "roku" in s["entity_id"]]
     rem = [s["entity_id"] for s in states
@@ -89,8 +138,9 @@ def _entities():
             "No Roku media_player found in Home Assistant. Add the Roku "
             "integration (Settings > Devices & services) and try again."
         )
-    _entities_cache = (entity, remote)
-    return _entities_cache
+    if remote is not None:
+        _entities_cache = (entity, remote)
+    return entity, remote
 
 
 def reset_cache():

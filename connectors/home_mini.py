@@ -37,8 +37,17 @@ except Exception:  # pragma: no cover - import-path fallback
     AnnouncementLog = None
 
 HERE = Path(__file__).resolve().parent
-ANNOUNCE_DIR = HERE.parent / "workspace" / "announcements"
-PORT = int(os.getenv("VIKI_ANNOUNCE_PORT", "7871"))
+ANNOUNCE_DIR = Path(os.getenv("VIKI_WORKSPACE") or HERE.parent / "workspace") / "announcements"
+
+
+def _announce_port():
+    try:
+        return int(os.getenv("VIKI_ANNOUNCE_PORT", "7871"))
+    except (TypeError, ValueError):
+        return 7871
+
+
+PORT = _announce_port()
 
 _server = None
 _server_lock = threading.Lock()
@@ -98,6 +107,16 @@ def _ha_states():
         return json.load(r)
 
 
+def _mini_candidates() -> list:
+    """media_player entity ids currently visible in HA (best effort)."""
+    try:
+        states = _ha_states()
+    except Exception:
+        return []
+    return [s["entity_id"] for s in states
+            if s["entity_id"].startswith("media_player.")]
+
+
 def find_mini_entity(name_hint: str | None = None) -> str | None:
     """Find the Home Mini's media_player entity in HA."""
     override = os.getenv("MINI_ENTITY", "").strip()
@@ -155,6 +174,15 @@ def _announce_ha(text: str, device: str | None, wait: bool = True) -> str:
 
     entity = find_mini_entity(device)
     if not entity:
+        if device:
+            # A hint that matches nothing: list what DOES exist so the
+            # user can pick a real name instead of guessing again.
+            cands = _mini_candidates()
+            if cands:
+                raise RuntimeError(
+                    f"No speaker matching {device!r}. Available players: "
+                    f"{', '.join(cands)}. Set MINI_ENTITY in .env to override."
+                )
         raise RuntimeError(
             "No speaker found in Home Assistant. Is the Google Cast integration "
             "set up and the Mini online? Set MINI_ENTITY in .env to override."

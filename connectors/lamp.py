@@ -29,24 +29,48 @@ def _ha():
     return base, token
 
 
+def _ha_bases():
+    """HA base URLs in try order (finding 54: HA_URL, then HA_URL_FALLBACKS)."""
+    bases = [os.getenv("HA_URL", "").rstrip("/")]
+    bases += [b.strip().rstrip("/") for b in
+              os.getenv("HA_URL_FALLBACKS", "").split(",") if b.strip()]
+    return [b for b in bases if b]
+
+
+def _open(build, timeout):
+    """Open a request built per base, falling through bases on connection errors only.
+
+    An HTTP response (even an error) means HA answered — retrying on
+    another host could double-actuate a service call, so it raises.
+    """
+    last = None
+    for base in _ha_bases():
+        try:
+            with urllib.request.urlopen(build(base), timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError) as e:
+            last = e
+    if last is not None:
+        raise last
+    raise RuntimeError("Home Assistant is not connected (HA_URL/HA_TOKEN).")
+
+
 def _service(domain, service, data):
-    base, token = _ha()
-    req = urllib.request.Request(
+    _, token = _ha()
+    return _open(lambda base: urllib.request.Request(
         f"{base}/api/services/{domain}/{service}",
         data=json.dumps(data).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.load(r)
+    ), timeout=10)
 
 
 def _get_states():
-    base, token = _ha()
-    req = urllib.request.Request(
+    _, token = _ha()
+    return _open(lambda base: urllib.request.Request(
         f"{base}/api/states", headers={"Authorization": f"Bearer {token}"}
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.load(r)
+    ), timeout=10)
 
 
 def resolve_lamp_entity() -> str | None:
@@ -113,7 +137,11 @@ class LampIndicator:
         }
 
     def restore(self):
-        snap = self._snapshot or {"on": False}
+        # No snapshot means the lamp was never driven: restoring must
+        # be a no-op, not a turn_off written to Home Assistant.
+        if self._snapshot is None:
+            return
+        snap = self._snapshot
         self._snapshot = None
         if not snap.get("on"):
             _service("light", "turn_off", {"entity_id": self.entity})

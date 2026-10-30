@@ -22,7 +22,7 @@ def at(hour, minute, day=15):
 class TestAdd(unittest.TestCase):
     def test_interval_job(self):
         s = fresh()
-        job = s.add("Check email", "interval", action="check urgent mail", every_minutes=15)
+        job = s.add("Check email", "interval", action="connection-check", every_minutes=15)
         self.assertEqual(job["kind"], "interval")
         self.assertTrue(job["enabled"])
         self.assertEqual(job["run_count"], 0)

@@ -137,6 +137,18 @@ class TestSpotify(TestCase):
             spm.spotify_volume("150")
         sp.volume.assert_called_once_with(100, device_id="d1")
 
+    def test_volume_named_device(self):
+        # Finding 30, second half: optional device name, matched the
+        # same substring way as spotify_play.
+        sp = fake_sp()
+        sp.devices.return_value = {"devices": [
+            {"id": "d1", "name": "Phone", "type": "Smartphone", "is_active": True},
+            {"id": "d2", "name": "Living Room TV", "type": "TV", "is_active": False}]}
+        with self._sp(sp):
+            out = spm.spotify_volume("40", device="living room")
+        sp.volume.assert_called_once_with(40, device_id="d2")
+        self.assertIn("Living Room TV", out)
+
     def test_no_active_device_message(self):
         sp = fake_sp()
         sp.pause_playback.side_effect = Exception("NO_ACTIVE_DEVICE")

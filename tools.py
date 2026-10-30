@@ -1,5 +1,5 @@
 """VIKI's toolbox. Each tool is a plain function plus a JSON schema the model sees."""
-import ast, json, math, operator, os, re, threading, urllib.parse, urllib.request
+import ast, json, math, operator, os, re, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -190,16 +190,59 @@ def write_file(path, content):
 # Gives the model a map of what's actually in the house.
 # "entities" = compact list (id, name, state) for the system prompt.
 # "full" = complete entity states with all attributes, for the dump action.
+# "updated" is an ISO timestamp; list/dump refresh when it is older than
+# the TTL so a renamed or deleted entity can't linger in the cache.
 HA_ENTITIES_CACHE = {"updated": None, "entities": [], "full": []}
+HA_ENTITIES_TTL_SECONDS = 600
+
+
+def _ha_cache_stale():
+    """True when the entity cache is empty or older than the TTL."""
+    if not HA_ENTITIES_CACHE["entities"]:
+        return True
+    updated = HA_ENTITIES_CACHE.get("updated")
+    if not updated:
+        return True
+    try:
+        when = datetime.fromisoformat(updated)
+    except ValueError:
+        return True
+    return (datetime.now() - when).total_seconds() > HA_ENTITIES_TTL_SECONDS
+
+
+def _ha_bases():
+    """HA base URLs in try order: HA_URL, then HA_URL_FALLBACKS (comma-separated).
+
+    Finding 54 (judgment call, flagged for veto): the primary host
+    (a LAN IP) can go stale after a DHCP change while the same HA
+    instance is still reachable by hostname, so fallbacks are tried
+    when the primary is unreachable. Only connection-level failures
+    fall through — an HTTP response means HA answered, and retrying
+    a service call on another host could double-actuate it.
+    """
+    bases = [os.getenv("HA_URL", "").rstrip("/")]
+    bases += [b.strip().rstrip("/") for b in
+              os.getenv("HA_URL_FALLBACKS", "").split(",") if b.strip()]
+    return [b for b in bases if b]
 
 
 def _ha_request(path, body=None, timeout=10):
     """Low-level HA API call. Returns parsed JSON."""
-    base, token = os.getenv("HA_URL", "").rstrip("/"), os.getenv("HA_TOKEN", "")
+    token = os.getenv("HA_TOKEN", "")
     hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     data = json.dumps(body).encode() if body is not None else None
-    with urllib.request.urlopen(urllib.request.Request(f"{base}{path}", data=data, headers=hdr), timeout=timeout) as r:
-        return json.load(r)
+    last = None
+    for base in _ha_bases():
+        try:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}{path}", data=data, headers=hdr), timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError) as e:
+            last = e
+    if last is not None:
+        raise last
+    raise RuntimeError("Home Assistant is not connected. Set HA_URL and HA_TOKEN in .env.")
 
 
 def refresh_ha_entities():
@@ -240,7 +283,7 @@ def home_assistant(action, entity_id="", domain="", service="", data=None):
     try:
         if action == "list":
             # Refresh if the cache is empty/stale, then return the compact list
-            if not HA_ENTITIES_CACHE["entities"]:
+            if _ha_cache_stale():
                 refresh_ha_entities()
             ents = HA_ENTITIES_CACHE["entities"]
             if not ents:
@@ -251,7 +294,7 @@ def home_assistant(action, entity_id="", domain="", service="", data=None):
             # Full entity dump: every entity with ALL attributes (brightness, color,
             # temperature, etc.). Use when you need details the compact list lacks.
             # Optional entity_id filters to one entity; otherwise returns everything.
-            if not HA_ENTITIES_CACHE["full"]:
+            if not HA_ENTITIES_CACHE["full"] or _ha_cache_stale():
                 refresh_ha_entities()
             full = HA_ENTITIES_CACHE["full"]
             if not full:
@@ -267,6 +310,15 @@ def home_assistant(action, entity_id="", domain="", service="", data=None):
             out = _ha_request(f"/api/states/{entity_id}")
             return json.dumps({"state": out["state"], "attributes": out["attributes"]})[:2000]
         elif action == "call":
+            if isinstance(data, str):
+                # The model sometimes sends data as a JSON string; parse
+                # it instead of failing on **str.
+                try:
+                    data = json.loads(data) if data.strip() else {}
+                except ValueError:
+                    return "data must be a JSON object, e.g. {\"brightness_pct\": 50}."
+                if not isinstance(data, dict):
+                    return "data must be a JSON object, e.g. {\"brightness_pct\": 50}."
             out = _ha_request(f"/api/services/{domain}/{service}", {"entity_id": entity_id, **(data or {})})
             return json.dumps(out)[:2000]
         else:
@@ -300,7 +352,7 @@ S = lambda d: {"type": "string", "description": d}
 SPECS = {
     "update_plan": _spec("update_plan", "Show the user your plan for a multi-step task. Call it first, then again as steps finish. status: pending|doing|done.",
         {"steps": {"type": "array", "items": {"type": "object", "properties": {"text": S("step"), "status": S("pending|doing|done")}}}}, ["steps"]),
-    "web_search": _spec("web_search", "Search the web for current information, news, or facts you don't know.", {"query": S("search query")}, ["query"]),
+    "web_search": _spec("web_search", "Search the web for current information, news, or facts you don't know. The snippets usually answer the question — only open a result with read_webpage when you need the full text.", {"query": S("search query")}, ["query"]),
     "read_webpage": _spec("read_webpage", "Open a URL and return its readable text. Use after web_search to read a promising result.", {"url": S("full URL")}, ["url"]),
     "get_weather": _spec("get_weather", "Current weather and 3-day outlook for a place.", {"location": S("city, e.g. Paris"), "unit": S("Fahrenheit or Celsius")}, ["location"]),
     "maps_distance": _spec("maps_distance", "Driving distance and time between two places (OpenStreetMap, no key needed). A map of the route is shown in the chat.", {"origin": S("starting place/address"), "destination": S("destination place/address")}, ["origin", "destination"]),
@@ -327,7 +379,7 @@ SPECS = {
     "write_file": _spec("write_file", "Create or overwrite a text file in the workspace (notes, drafts, reports). Needs user approval.",
         {"path": S("relative path"), "content": S("file text")}, ["path", "content"], risky=True),
     "home_assistant": _spec("home_assistant", "Control Home Assistant. Actions: list (compact entity list - call FIRST when unsure what exists), dump (FULL details of all entities with every attribute, or one entity if entity_id given), state (read one entity), call (run a service). Common domains/services: light.turn_on/turn_off/toggle (data: brightness_pct, color_name, rgb_color), switch.turn_on/turn_off/toggle, climate.set_temperature (data: temperature), media_player.play_media/volume_set/media_play_pause, script.turn_on, automation.trigger. No approval needed - act directly, EXCEPT call actions on lock, alarm_control_panel, or cover domains (door locks, alarms, blinds/garage doors), which need user approval.",
-        {"action": S("list, state, dump, or call"), "entity_id": S("e.g. light.living_room_lamp (required for state/call; optional filter for dump; omit for list)"), "domain": S("e.g. light (required for call)"), "service": S("e.g. turn_on (required for call)"), "data": S("optional JSON object, e.g. {\"brightness_pct\": 50}")}, ["action"], risky_if=_ha_call_needs_approval),
+        {"action": S("list, state, dump, or call"), "entity_id": S("e.g. light.living_room_lamp (required for state/call; optional filter for dump; omit for list)"), "domain": S("e.g. light (required for call)"), "service": S("e.g. turn_on (required for call)"), "data": {"type": "object", "description": "optional service data, e.g. {\"brightness_pct\": 50}"}}, ["action"], risky_if=_ha_call_needs_approval),
     "gmail_search": _spec("gmail_search", "Search the user's Gmail. Returns message ids, senders, subjects, and snippets; use gmail_read for the full text.",
         {"query": S("Gmail search query, e.g. 'from:amazon subject:receipt'"), "max_results": S("max results (default 5)")}, ["query"]),
     "gmail_read": _spec("gmail_read", "Read a full Gmail message by id (get ids from gmail_search).",
@@ -404,7 +456,8 @@ SPECS = {
     "spotify_devices": _spec("spotify_devices", "List devices Spotify can play on.", {}, []),
     "spotify_now_playing": _spec("spotify_now_playing", "What's currently playing on Spotify.", {}, []),
     "spotify_volume": _spec("spotify_volume", "Set Spotify volume (0-100).",
-        {"percent": S("0-100")}, ["percent"]),
+        {"percent": S("0-100"),
+         "device": S("device name, e.g. 'Living Room TV' (optional; default: the active device)")}, ["percent"]),
     "viki_check_update": _spec("viki_check_update", "Check if a newer VIKI release is available on GitHub. Safe, read-only.",
         {}, []),
     "viki_apply_update": _spec("viki_apply_update", "Download and apply the latest VIKI release, then restart. Your .env, tokens, and data are preserved. Needs user approval.",
@@ -451,10 +504,13 @@ def viki_apply_update() -> str:
 def _run_job_action(job):
     """Run one scheduled job by its own action, mirroring the panel
     button and the scheduled tick (see server.py's executor). A blank
-    action means connection-check, the historical default. Failures
-    are returned as text, never raised into the tick or chat loop;
-    smart_announce imports stay lazy, as in server.py."""
+    action means connection-check, the historical default; anything
+    else unknown is reported, never silently run as something else.
+    Failures are returned as text, never raised into the tick or chat
+    loop; smart_announce imports stay lazy, as in server.py."""
     action = " ".join(str(job.get("action") or "").split())
+    if action and action not in TASK_ACTIONS:
+        return f"No built-in action for {action!r}."
     if action == "follow-up-nudges":
         try:
             if not google_connected():
@@ -540,14 +596,27 @@ class Toolbox:
                       "update_plan": lambda steps: "Plan updated.",
                       "viki_check_update": viki_check_update,
                       "viki_apply_update": viki_apply_update}
-        self.enabled = [n for n in SPECS
-                        if (n != "home_assistant" or (os.getenv("HA_URL") and os.getenv("HA_TOKEN")))
-                        and (n not in GOOGLE_TOOLS or google_connected())
-                        and (n not in GITHUB_TOOLS or github_connected())
-                        and (n not in ROKU_TOOLS or ha_connected())
-                        and (n not in PLEX_TOOLS or plex_configured())
-                        and (n not in SPOTIFY_TOOLS or spotify_connected())
-                        and (n not in UPDATE_TOOLS or update_configured())]
+        self.enabled = self._compute_enabled()
+
+    def _compute_enabled(self):
+        """Tool names available right now, from connection state."""
+        return [n for n in SPECS
+                if (n != "home_assistant" or (os.getenv("HA_URL") and os.getenv("HA_TOKEN")))
+                and (n not in GOOGLE_TOOLS or google_connected())
+                and (n not in GITHUB_TOOLS or github_connected())
+                and (n not in ROKU_TOOLS or ha_connected())
+                and (n not in PLEX_TOOLS or plex_configured())
+                and (n not in SPOTIFY_TOOLS or spotify_connected())
+                and (n not in UPDATE_TOOLS or update_configured())]
+
+    def refresh_enabled(self):
+        """Re-evaluate enablement (a token added after startup must
+        not wait for a restart) and return the current list. Names
+        outside SPECS (test doubles) are preserved untouched."""
+        computed = self._compute_enabled()
+        kept = [n for n in self.enabled if n not in SPECS]
+        self.enabled = computed + [n for n in kept if n not in computed]
+        return list(self.enabled)
 
     def _schedule_task(self, name, kind, action, at=None, every_minutes=None):
         """Create a recurring or one-shot job. Any of the executor's
@@ -558,6 +627,10 @@ class Toolbox:
         if action not in TASK_ACTIONS:
             return (f"Unknown check action {action!r} — use one of "
                     f"{', '.join(TASK_ACTIONS)}.")
+        if isinstance(every_minutes, bool):
+            return "every_minutes must be a whole number of minutes."
+        if isinstance(every_minutes, float) and not every_minutes.is_integer():
+            return "every_minutes must be a whole number of minutes."
         try:
             minutes = int(every_minutes) if every_minutes not in (None, "") else None
         except (TypeError, ValueError):
@@ -643,6 +716,10 @@ class Toolbox:
         so a time change doesn't mean deleting and recreating the check."""
         for t in self.scheduler.list_tasks():
             if t["id"] == job_id:
+                if isinstance(every_minutes, bool):
+                    return "every_minutes must be a whole number of minutes."
+                if isinstance(every_minutes, float) and not every_minutes.is_integer():
+                    return "every_minutes must be a whole number of minutes."
                 try:
                     minutes = int(every_minutes) if every_minutes not in (None, "") else None
                 except (TypeError, ValueError):
@@ -699,7 +776,9 @@ class Toolbox:
         return f"Ran '{outcome['name']}' now — {outcome['result']}"
 
     def schemas(self):
-        return [SPECS[n]["schema"] for n in self.enabled]
+        # Per-turn re-evaluation: the agent loop calls schemas() every
+        # turn, so a freshly connected account shows up next turn.
+        return [SPECS[n]["schema"] for n in self.refresh_enabled() if n in SPECS]
 
     def needs_approval(self, name, args):
         spec = SPECS.get(name, {})
@@ -708,9 +787,15 @@ class Toolbox:
         cond = spec.get("risky_if")
         return bool(cond(args or {}) if cond else False)
 
-    def run(self, name, args):
+    def run(self, name, args, cancel=None):
         fn = self.funcs.get(name) if name in self.enabled else None
         if not fn:
+            if name in SPECS:
+                # A real tool that is currently disabled: say why it
+                # can't run (usually "not connected") instead of a bare
+                # "Unknown tool", so the model can tell the user how
+                # to connect it.
+                return _disabled_hint(name)
             return f"Unknown tool: {name}"
         # Per-tool timeout: a hung network/browser tool must not stall the
         # agent loop forever. Override with VIKI_TOOL_TIMEOUT (seconds).
@@ -732,12 +817,61 @@ class Toolbox:
 
         worker = threading.Thread(target=_target, daemon=True)
         worker.start()
-        worker.join(timeout)
+        # Join in slices so Stop is honoured mid-run: the worker thread
+        # keeps running (daemon) but the loop stops waiting at once.
+        deadline = time.monotonic() + timeout
+        while worker.is_alive() and time.monotonic() < deadline:
+            worker.join(0.2)
+            if cancel is not None and cancel.is_set():
+                return "Stopped by user."
         if worker.is_alive():
             # The thread keeps running in the background (daemon) but the
             # agent gets a graceful, actionable answer instead of hanging.
+            # Finding 33 (judgment call): for a side-effect tool the
+            # timed-out action may still complete after the timeout, so
+            # the model must NOT blindly retry it (that double-sends,
+            # double-books, double-charges). Tell it to check first.
+            spec = SPECS.get(name, {})
+            risky = bool(spec.get("risky"))
+            if not risky:
+                cond = spec.get("risky_if")
+                if cond is not None:
+                    try:
+                        risky = bool(cond(args))
+                    except Exception:
+                        risky = False
+            if risky:
+                return (f"{name} timed out after {timeout:g}s. The action "
+                        "may still have gone through in the background — "
+                        "do NOT retry it; check whether it completed first.")
             return (f"{name} timed out after {timeout:g}s — the service may "
                     "be down or slow. Try again, or do something else.")
         if "error" in box:
             return box["error"]
         return box.get("result", "")
+
+
+def _disabled_hint(name):
+    """Why a real but currently disabled tool can't run."""
+    if name in GOOGLE_TOOLS:
+        return ("Google is not connected, so I can't use that tool. "
+                "Run 'python -m connectors.google_auth' once to connect it.")
+    if name in GITHUB_TOOLS:
+        return ("GitHub is not connected, so I can't use that tool. "
+                "Set GITHUB_TOKEN in the environment first.")
+    if name in ROKU_TOOLS:
+        return ("The Roku isn't reachable through Home Assistant, so I can't use that tool. "
+                "Add the Roku integration in Home Assistant (Settings > Devices & services).")
+    if name in PLEX_TOOLS:
+        return ("Plex is not configured, so I can't use that tool. "
+                "Set PLEX_URL and PLEX_TOKEN in the environment first.")
+    if name in SPOTIFY_TOOLS:
+        return ("Spotify is not connected, so I can't use that tool. "
+                "Run 'python -m connectors.spotify_auth' once to connect it.")
+    if name in UPDATE_TOOLS:
+        return ("Updates aren't configured, so I can't use that tool. "
+                "Set VIKI_UPDATE_REPO and GITHUB_TOKEN in the environment first.")
+    if name == "home_assistant":
+        return ("Home Assistant isn't configured, so I can't use that tool. "
+                "Set HA_URL and HA_TOKEN in the environment first.")
+    return f"Unknown tool: {name}"

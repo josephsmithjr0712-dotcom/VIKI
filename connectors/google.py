@@ -47,10 +47,32 @@ def _credentials():
         raise RuntimeError(
             "Google is not connected yet. Run 'python -m connectors.google_auth' once to approve access."
         )
-    creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+    try:
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    except Exception:
+        raise RuntimeError(
+            "Google token file is unreadable. Run 'python -m connectors.google_auth' "
+            "again to reconnect."
+        )
+    if creds.expired:
+        if not creds.refresh_token:
+            raise RuntimeError(
+                "Google connection expired and can't refresh. Run "
+                "'python -m connectors.google_auth' again to reconnect."
+            )
+        try:
+            creds.refresh(Request())
+        except Exception:
+            raise RuntimeError(
+                "Google token refresh failed. Run 'python -m connectors.google_auth' "
+                "again to reconnect."
+            )
         TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
+    if not creds.valid:
+        raise RuntimeError(
+            "Google credentials are invalid. Run 'python -m connectors.google_auth' "
+            "again to reconnect."
+        )
     return creds
 
 
@@ -62,8 +84,8 @@ def _service(api: str, version: str):
 
 # --- Gmail -----------------------------------------------------------------
 def gmail_search(query, max_results=5):
-    svc = _service("gmail", "v1")
     try:
+        svc = _service("gmail", "v1")
         resp = (
             svc.users().messages().list(userId="me", q=query, maxResults=int(max_results)).execute()
         )
@@ -103,8 +125,8 @@ def gmail_search_structured(query, max_results=10):
     caller can tell "search failed" apart from "nothing found"; a
     single message that fails to fetch yields a dict with just its id.
     """
-    svc = _service("gmail", "v1")
     try:
+        svc = _service("gmail", "v1")
         resp = (
             svc.users().messages().list(userId="me", q=query, maxResults=int(max_results)).execute()
         )
@@ -147,8 +169,8 @@ def gmail_unanswered_threads(older_than_days=2, max_threads=10):
     RuntimeError so a caller can tell "search failed" apart from
     "nothing awaiting a reply", matching gmail_search_structured.
     """
-    svc = _service("gmail", "v1")
     try:
+        svc = _service("gmail", "v1")
         resp = (
             svc.users().threads().list(
                 userId="me", q=f"in:inbox older_than:{int(older_than_days)}d",
@@ -205,8 +227,8 @@ def _body_from_payload(payload) -> str:
 
 
 def gmail_read(message_id, max_chars=6000):
-    svc = _service("gmail", "v1")
     try:
+        svc = _service("gmail", "v1")
         full = svc.users().messages().get(userId="me", id=message_id, format="full").execute()
     except Exception as e:
         return f"Gmail read failed: {e}"
@@ -223,7 +245,10 @@ def gmail_read(message_id, max_chars=6000):
 def gmail_send(to, subject, body):
     import email.message
 
-    svc = _service("gmail", "v1")
+    try:
+        svc = _service("gmail", "v1")
+    except Exception as e:
+        return f"Gmail send failed: {e}"
     msg = email.message.EmailMessage()
     msg["To"] = to
     msg["Subject"] = subject
@@ -238,9 +263,9 @@ def gmail_send(to, subject, body):
 
 # --- Calendar --------------------------------------------------------------
 def calendar_list(days=1, max_results=10):
-    svc = _service("calendar", "v3")
     now = datetime.now().astimezone()
     try:
+        svc = _service("calendar", "v3")
         resp = (
             svc.events()
             .list(
@@ -270,8 +295,8 @@ def calendar_list(days=1, max_results=10):
 
 def calendar_create(summary, start, end, description="", location=""):
     """start/end as 'YYYY-MM-DD HH:MM' in local time."""
-    svc = _service("calendar", "v3")
     try:
+        svc = _service("calendar", "v3")
         tz = datetime.now().astimezone().tzinfo
         s = datetime.strptime(start, "%Y-%m-%d %H:%M").replace(tzinfo=tz)
         e = datetime.strptime(end, "%Y-%m-%d %H:%M").replace(tzinfo=tz)

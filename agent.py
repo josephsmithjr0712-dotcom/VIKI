@@ -1,5 +1,5 @@
 """VIKI agent core: a plan -> act -> observe loop on top of Ollama tool calling."""
-import json, os, secrets, time
+import inspect, json, math, os, re, secrets, sys, time
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,6 +67,14 @@ _TRANSIENT_ERRORS = tuple(
 # with a steer to change approach, instead of burning steps in a loop.
 _MAX_IDENTICAL_CALLS = 3
 
+# Empty-answer guard (v0.3.39): a model turn that emits only reasoning
+# (stripped by _ThinkFilter) or nothing at all used to return "" — the
+# web UI then showed "(no answer)" and the clock spoke nothing and went
+# back to Listening, exactly the failure seen 2026-10-29 evening. One
+# retry with a direct-answer nudge, then an honest fallback sentence
+# instead of silence.
+_EMPTY_ANSWER_FALLBACK = "I couldn't come up with an answer just now — please try asking again."
+
 # Tool-result history cap: a single huge tool result (a long web page, a
 # big file read) would otherwise land verbatim in every later model turn,
 # bloating context and slowing the small local model. History keeps the
@@ -91,6 +99,24 @@ def _args_key(args):
         return repr(sorted((str(k), str(v)) for k, v in args.items()))
 
 
+# Tag forms, case-insensitive with optional whitespace: <think>, <Think>,
+# < think >, </think>, </ think >. A partial tag split across chunks is
+# held back, never emitted mid-tag.
+_THINK_OPEN = re.compile(r"<\s*think\s*>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(r"<\s*/\s*think\s*>", re.IGNORECASE)
+# A buffer suffix that could still grow into a tag: starts with "<" and
+# contains no ">" yet, and its letters (if any) follow the think sequence.
+_PARTIAL_TAG = re.compile(r"^<\s*/?\s*t?h?i?n?k?\s*$", re.IGNORECASE)
+
+
+def _partial_tag_len(text):
+    """Length of the longest suffix of text that could be a partial tag."""
+    for n in range(min(len(text), 12), 0, -1):
+        if _PARTIAL_TAG.match(text[-n:]):
+            return n
+    return 0
+
+
 class _ThinkFilter:
     """Stateful stripper for <think>...</think> leaked into answer text (v0.3.38).
 
@@ -98,50 +124,69 @@ class _ThinkFilter:
     reasoning that Ollama puts into the content stream — which happens
     even with think=False on some servers/models — would be spoken aloud.
     feed() returns only answer text, holding back a tail that could be a
-    tag split across chunks; flush() drops an unclosed <think> block at
-    stream end rather than leaking partial reasoning.
+    tag split across chunks. Nested <think> blocks are depth-counted, a
+    stray </think> outside any block is stripped instead of spoken, and
+    tags match case-insensitively with optional whitespace. flush() at
+    stream end drops an unclosed <think> block rather than leaking
+    partial reasoning, but returns any held non-think tail (ordinary
+    text that only looked like a tag prefix) so it is not lost.
     """
 
     def __init__(self):
-        self.in_think = False
+        self.depth = 0
         self.buf = ""
 
     def feed(self, text):
         self.buf += text or ""
         out = []
-        while True:
-            if self.in_think:
-                end = self.buf.find("</think>")
-                if end == -1:
-                    keep = 0
-                    for n in range(min(len(self.buf), 7), 0, -1):
-                        if "</think>"[:n] == self.buf[-n:]:
-                            keep = n
-                            break
-                    self.buf = self.buf[-keep:] if keep else ""
-                    break
-                self.buf = self.buf[end + len("</think>"):]
-                self.in_think = False
-                continue
-            start = self.buf.find("<think>")
-            if start == -1:
-                keep = 0
-                for n in range(min(len(self.buf), 6), 0, -1):
-                    if "<think>"[:n] == self.buf[-n:]:
-                        keep = n
-                        break
-                out.append(self.buf[:-keep] if keep else self.buf)
+        while self.buf:
+            if self.depth:
+                m_open = _THINK_OPEN.search(self.buf)
+                m_close = _THINK_CLOSE.search(self.buf)
+                # Earliest tag wins: a nested open deepens, a close shallows.
+                if m_close and (not m_open or m_close.start() <= m_open.start()):
+                    self.depth -= 1
+                    self.buf = self.buf[m_close.end():]
+                    continue
+                if m_open:
+                    self.depth += 1
+                    self.buf = self.buf[m_open.end():]
+                    continue
+                # No complete tag left: hold a possible partial close tag,
+                # drop the rest (it is inside a think block).
+                keep = _partial_tag_len(self.buf)
                 self.buf = self.buf[-keep:] if keep else ""
                 break
-            out.append(self.buf[:start])
-            self.buf = self.buf[start + len("<think>"):]
-            self.in_think = True
+            m_open = _THINK_OPEN.search(self.buf)
+            m_close = _THINK_CLOSE.search(self.buf)
+            if m_close and (not m_open or m_close.start() < m_open.start()):
+                # Stray close tag: emit the text before it, drop the tag.
+                out.append(self.buf[:m_close.start()])
+                self.buf = self.buf[m_close.end():]
+                continue
+            if m_open:
+                out.append(self.buf[:m_open.start()])
+                self.depth = 1
+                self.buf = self.buf[m_open.end():]
+                continue
+            keep = _partial_tag_len(self.buf)
+            if keep:
+                out.append(self.buf[:-keep])
+                self.buf = self.buf[-keep:]
+            else:
+                out.append(self.buf)
+                self.buf = ""
+            break
         return "".join(out)
 
     def flush(self):
-        self.buf = ""
-        self.in_think = False
-        return ""
+        if self.depth:
+            # Unclosed think block: drop it, never leak partial reasoning.
+            self.buf = ""
+            self.depth = 0
+            return ""
+        tail, self.buf = self.buf, ""
+        return tail
 
 
 # Cloud-model option (v0.3.18): when VIKI_CLOUD_MODEL, VIKI_CLOUD_BASE_URL
@@ -177,7 +222,7 @@ def _cloud_config():
     model = (os.getenv("VIKI_CLOUD_MODEL") or os.getenv("VIKI_GEMINI_MODEL") or "").strip()
     base = (os.getenv("VIKI_CLOUD_BASE_URL") or "").strip().rstrip("/")
     key = (os.getenv("VIKI_CLOUD_API_KEY") or os.getenv("VIKI_GEMINI_API_KEY") or "").strip()
-    if not base and model.lower().startswith("gemini-"):
+    if not base and (model.lower() == "gemini" or model.lower().startswith("gemini-")):
         base = _GEMINI_OPENAI_BASE_URL
     if not (model and base and key):
         return None
@@ -185,7 +230,7 @@ def _cloud_config():
         timeout = float(os.getenv("VIKI_CLOUD_TIMEOUT", "60"))
     except (TypeError, ValueError):
         timeout = 60.0
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         timeout = 60.0
     return {"model": model, "base_url": base, "api_key": key, "timeout": timeout}
 
@@ -220,6 +265,8 @@ def _cloud_messages(messages):
                         "content": m.get("content") or ""})
         else:
             out.append({"role": role, "content": m.get("content") or ""})
+    if pending:
+        raise ValueError("assistant tool calls without matching tool messages")
     return out
 
 
@@ -233,7 +280,10 @@ class VIKI:
                 "Install it with: pip install ollama"
             )
         self.client = ollama.Client(host=os.getenv("VIKI_ADDRESS", "http://localhost:11434"))
-        self.max_steps = int(os.getenv("VIKI_MAX_STEPS", "10"))
+        try:
+            self.max_steps = max(1, int(os.getenv("VIKI_MAX_STEPS", "10")))
+        except (TypeError, ValueError):
+            self.max_steps = 10
         try:
             self.retries = max(0, int(os.getenv("VIKI_RETRIES", "2")))
         except (TypeError, ValueError):
@@ -244,6 +294,7 @@ class VIKI:
             self.retry_delay = 1.0
         self.toolbox = toolbox
         self.think_ok = None
+        self.tools_ok = None  # mirrors think_ok: False once a model refuses tools
 
     def warmup(self):
         """Pre-load the model into Ollama's memory so the first real request is fast.
@@ -271,6 +322,10 @@ class VIKI:
         (network, non-2xx, bad payload, unpaired tool call) so the caller
         can fall back to local Ollama. The API key travels only in the
         Authorization header and is never included in any error."""
+        if think:
+            # Cloud deltas carry no reasoning channel: say so up front
+            # instead of silently dropping a requested think=True.
+            emit("status", "Cloud model doesn't expose reasoning; answering without it.")
         payload = {"model": cfg["model"], "messages": _cloud_messages(messages),
                    "stream": True, "temperature": 0.2, "top_p": 0.9}
         if tools:
@@ -283,6 +338,7 @@ class VIKI:
             method="POST")
         content, parts, order = [], {}, []
         filt = _ThinkFilter()
+        next_idx = 0
         with urllib.request.urlopen(req, timeout=cfg["timeout"]) as resp:
             for raw in resp:
                 if cancel.is_set():
@@ -301,15 +357,35 @@ class VIKI:
                         content.append(clean)
                         emit("token", clean)
                 for tc in delta.get("tool_calls") or []:
-                    idx = tc.get("index", 0)
+                    fn = tc.get("function") or {}
+                    raw_idx = tc.get("index")
+                    if isinstance(raw_idx, int) and not isinstance(raw_idx, bool):
+                        idx = raw_idx
+                        if (idx in parts and parts[idx]["name"] and fn.get("name")
+                                and fn["name"] != parts[idx]["name"]):
+                            raise ValueError("cloud tool call index reused with a different name")
+                        next_idx = max(next_idx, idx + 1)
+                    elif fn.get("name") or not order:
+                        # Provider omitted the index and this chunk names
+                        # a call (or is the first chunk): start a new
+                        # sequential call instead of merging into index 0.
+                        idx = next_idx
+                        next_idx += 1
+                    else:
+                        # Index-less continuation chunk (arguments only):
+                        # it belongs to the most recent call.
+                        idx = order[-1]
                     if idx not in parts:
                         parts[idx] = {"name": "", "arguments": ""}
                         order.append(idx)
-                    fn = tc.get("function") or {}
                     if fn.get("name"):
                         parts[idx]["name"] = fn["name"]
                     if fn.get("arguments"):
                         parts[idx]["arguments"] += fn["arguments"]
+        tail = filt.flush()
+        if tail:
+            content.append(tail)
+            emit("token", tail)
         calls = []
         for idx in order:
             part = parts[idx]
@@ -336,12 +412,52 @@ class VIKI:
         request details."""
         cloud = _cloud_config()
         if cloud and not any(m.get("images") for m in messages):
-            try:
-                return self._stream_cloud(cloud, messages, tools, think, emit, cancel)
-            except Cancelled:
-                raise
-            except Exception:
-                emit("status", "Cloud model unavailable, falling back to the local model.")
+            # Finding 7 (judgment call, flagged for veto): cloud circuit
+            # breaker. After N consecutive cloud failures the cloud path
+            # pauses for a cooldown instead of being re-tried (and
+            # re-failed) on every turn; the local model carries the
+            # turns in between. Defaults: 3 failures, 5-minute cooldown
+            # (VIKI_CLOUD_BREAKER_FAILURES / VIKI_CLOUD_BREAKER_COOLDOWN).
+            # No response memoisation: caching cloud answers risks
+            # serving stale replies, so only the failure path is gated.
+            if time.monotonic() < getattr(self, "_cloud_cooldown_until", 0):
+                pass  # breaker open: skip straight to the local model
+            else:
+                cloud_tokens = []
+
+                def _cloud_emit(kind, payload):
+                    # Finding 8 (judgment call): if the cloud stream
+                    # already emitted tokens and then fails, the local
+                    # fallback would re-stream the whole answer on top
+                    # of them. Record tokens so the fallback can clear
+                    # them first (reset_answer) instead of duplicating.
+                    if kind == "token":
+                        cloud_tokens.append(payload)
+                    emit(kind, payload)
+
+                try:
+                    result = self._stream_cloud(cloud, messages, tools, think, _cloud_emit, cancel)
+                    self._cloud_failures = 0
+                    return result
+                except Cancelled:
+                    raise
+                except Exception:
+                    failures = getattr(self, "_cloud_failures", 0) + 1
+                    self._cloud_failures = failures
+                    try:
+                        threshold = int(os.getenv("VIKI_CLOUD_BREAKER_FAILURES", "3"))
+                    except (TypeError, ValueError):
+                        threshold = 3
+                    if threshold > 0 and failures >= threshold:
+                        try:
+                            cooldown = float(os.getenv("VIKI_CLOUD_BREAKER_COOLDOWN", "300"))
+                        except (TypeError, ValueError):
+                            cooldown = 300.0
+                        self._cloud_cooldown_until = time.monotonic() + max(0.0, cooldown)
+                        emit("status", f"Cloud model paused after {failures} repeated failures; using the local model for the next {cooldown:g} seconds.")
+                    if cloud_tokens:
+                        emit("reset_answer", "")
+                    emit("status", "Cloud model unavailable, falling back to the local model.")
         retries_left, delay = self.retries, self.retry_delay
         while True:
             kw = dict(model=self.model, messages=messages, stream=True, options={"temperature": 0.2, "top_p": 0.9})
@@ -365,14 +481,23 @@ class VIKI:
                         if clean:
                             content.append(clean); emit("token", clean)
                     if m.tool_calls: calls.extend(m.tool_calls)
-                filt.flush()
+                tail = filt.flush()
+                if tail:
+                    content.append(tail); emit("token", tail)
                 return "".join(content), "".join(thinking), calls
             except ollama.ResponseError as e:
+                # Finding 8: this attempt already streamed some tokens
+                # to the UI (and, on the clock, to speech). A retry
+                # re-streams the whole answer, so clear the partial
+                # text first instead of letting it duplicate.
+                if content:
+                    emit("reset_answer", "")
                 err = str(e).lower()
                 if think and "does not support thinking" in err:
                     self.think_ok, think = False, False
                     emit("status", f"{self.model} can't expose reasoning; showing steps instead.")
                 elif tools and "does not support tools" in err:
+                    self.tools_ok = False
                     tools = None
                     emit("status", f"{self.model} has no tool support, so I'm answering without tools. Try a model like llama3.1, qwen3, or mistral-nemo.")
                 elif any(m.get("images") for m in messages) and any(
@@ -383,14 +508,32 @@ class VIKI:
                     emit("status", f"{self.model} can't process images, so I'm working from your text only. "
                                    "A vision model like qwen3-vl or gemma3 would see them.")
                 else:
+                    # Server-side failure (5xx) or rate limit (429):
+                    # retry like a transient error instead of dying.
+                    status = getattr(e, "status_code", None)
+                    if status is None:
+                        m = re.search(r"\b(429|5\d\d)\b", err)
+                        status = int(m.group(1)) if m else None
+                    if status == 429 or (isinstance(status, int) and 500 <= status <= 599):
+                        if retries_left > 0:
+                            retries_left -= 1
+                            emit("status", f"{self.model} returned {status}, retrying ({retries_left} left)...")
+                            if cancel.wait(delay):
+                                raise Cancelled()
+                            delay *= 2
+                            continue
                     raise
             except _TRANSIENT_ERRORS as e:
+                # Finding 8: same partial-token clear as above before retrying.
+                if content:
+                    emit("reset_answer", "")
                 # Network hiccup (dropped connection, reset peer, timeout):
                 # retry the whole turn instead of killing the run.
                 if retries_left > 0:
                     retries_left -= 1
                     emit("status", f"Connection hiccup talking to {self.model}, retrying ({retries_left} left)...")
-                    time.sleep(delay)
+                    if cancel.wait(delay):
+                        raise Cancelled()
                     delay *= 2
                     continue
                 raise
@@ -402,46 +545,105 @@ class VIKI:
         If the model can't process images, _stream strips them and continues on text."""
         import threading
         cancel = cancel or threading.Event()
-        system = (PERSONALITY + "\n\n" if PERSONALITY else "") + SYSTEM_PROMPT
-        # Tell the model what smart-home devices actually exist, so it uses
-        # real entity_ids instead of guessing. Refreshed at server startup.
+        used, steps = [], 0
         try:
-            from tools import ha_entities_text
-            ha_list = ha_entities_text()
-            if ha_list:
-                system += ("\n\nYour smart home devices (from Home Assistant - use these exact entity_ids, "
-                           "never invent new ones):\n" + ha_list)
-        except Exception:
-            pass
-        facts = memory(prompt) if callable(memory) else (memory or [])
-        if facts:
-            system += "\n\nKnown about the user (use when relevant, don't recite):\n" + "\n".join(f"- {m}" for m in facts)
-        if profile:
-            system += "\n\nUser profile (likes, dislikes, hobbies, favorites — use to tailor answers, don't recite):\n" + profile
-        messages = [{"role": "system", "content": system}, *history]
-        user_msg = {"role": "user", "content": prompt}
-        if images:
-            user_msg["images"] = images
-        messages.append(user_msg)
-        tools, used, steps = self.toolbox.schemas(), [], 0
-        # Repeat-call guard state: the model sometimes loops on the same
-        # failing (or pointless) tool call. Track consecutive identical
-        # calls so we can nudge it, then stop re-executing.
-        last_key, last_result, repeats = None, None, 0
-        try:
+            system = (PERSONALITY + "\n\n" if PERSONALITY else "") + SYSTEM_PROMPT
+            # Tell the model what smart-home devices actually exist, so it uses
+            # real entity_ids instead of guessing. Refreshed at server startup.
+            try:
+                from tools import ha_entities_text
+                ha_list = ha_entities_text()
+                if ha_list:
+                    system += ("\n\nYour smart home devices (from Home Assistant - use these exact entity_ids, "
+                               "never invent new ones):\n" + ha_list)
+            except Exception:
+                pass
+            facts = memory(prompt) if callable(memory) else (memory or [])
+            if facts:
+                system += "\n\nKnown about the user (use when relevant, don't recite):\n" + "\n".join(f"- {m}" for m in facts)
+            if profile:
+                system += "\n\nUser profile (likes, dislikes, hobbies, favorites — use to tailor answers, don't recite):\n" + profile
+            messages = [{"role": "system", "content": system}, *history]
+            user_msg = {"role": "user", "content": prompt}
+            if images:
+                user_msg["images"] = images
+            messages.append(user_msg)
+            tools = self.toolbox.schemas()
+            # Toolboxes that predate the cancel argument (older code,
+            # test doubles) keep working: only pass cancel when the
+            # run method actually accepts it.
+            try:
+                _run_params = inspect.signature(self.toolbox.run).parameters
+                run_accepts_cancel = ("cancel" in _run_params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in _run_params.values()))
+            except (TypeError, ValueError):
+                run_accepts_cancel = False
+            # Repeat-call guard state: the model sometimes loops on the same
+            # failing (or pointless) tool call. Track consecutive identical
+            # calls so we can nudge it, then stop re-executing.
+            last_key, last_result, repeats = None, None, 0
+            empty_retries = 0
             while steps < self.max_steps:
                 steps += 1
                 emit("status", f"Step {steps}: thinking" if steps > 1 else "Working on it")
-                content, thinking, calls = self._stream(messages, tools, think and self.think_ok is not False, emit, cancel)
+                turn_tools = None if self.tools_ok is False else tools
+                content, thinking, calls = self._stream(messages, turn_tools, think and self.think_ok is not False, emit, cancel)
                 if thinking: self.think_ok = True
+                if calls: self.tools_ok = True
                 if not calls:
+                    if not content.strip():
+                        if empty_retries < 1:
+                            empty_retries += 1
+                            messages.append({"role": "user", "content": (
+                                "You returned no answer text. Answer the user's question "
+                                "directly in a short reply, with no reasoning preamble.")})
+                            continue
+                        return {"type": "text", "content": _EMPTY_ANSWER_FALLBACK,
+                                "tools": used, "steps": steps}
                     return {"type": "text", "content": content.strip(), "tools": used, "steps": steps}
                 emit("reset_answer", "")  # text streamed before a tool call is narration, not the answer
-                messages.append({"role": "assistant", "content": content, "tool_calls": [
-                    {"function": {"name": c.function.name, "arguments": dict(c.function.arguments or {})}} for c in calls]})
-                for i, c in enumerate(calls):
+                norm_calls = []
+                for c in calls:
+                    try:
+                        fn = c.function
+                        name = fn.name if fn is not None else None
+                        raw_args = fn.arguments if fn is not None else None
+                        if not isinstance(name, str) or not name:
+                            raise ValueError("missing tool name")
+                        if raw_args is None:
+                            args = {}
+                        elif isinstance(raw_args, dict):
+                            args = dict(raw_args)
+                        elif isinstance(raw_args, str):
+                            args = json.loads(raw_args)
+                            if not isinstance(args, dict):
+                                raise ValueError("arguments are not an object")
+                        else:
+                            raise ValueError("arguments are not an object")
+                        norm_calls.append((name, args))
+                    except (ValueError, AttributeError, TypeError):
+                        # Malformed call from the model (string args that
+                        # don't parse, missing name): tell the model and
+                        # keep looping instead of crashing the turn.
+                        norm_calls.append(None)
+                assistant_calls = []
+                for nc in norm_calls:
+                    if nc is None:
+                        assistant_calls.append({"function": {"name": "", "arguments": {}}})
+                    else:
+                        assistant_calls.append({"function": {"name": nc[0], "arguments": nc[1]}})
+                messages.append({"role": "assistant", "content": content, "tool_calls": assistant_calls})
+                defer_note = None
+                for i, nc in enumerate(norm_calls):
                     if cancel.is_set(): raise Cancelled()
-                    name, args = c.function.name, dict(c.function.arguments or {})
+                    if nc is None:
+                        cid = secrets.token_urlsafe(16)
+                        result = "Malformed tool call ignored: no usable tool name or arguments. Call a real tool with a JSON object of arguments, or answer directly."
+                        emit("tool_result", {"id": cid, "result": result})
+                        messages.append({"role": "tool", "tool_name": "", "content": result})
+                        continue
+                    name, args = nc
                     cid = secrets.token_urlsafe(16)
                     key = (name, _args_key(args))
                     repeats = repeats + 1 if key == last_key else 1
@@ -463,7 +665,10 @@ class VIKI:
                         result = "The user denied this action. Do not retry it; offer an alternative."
                     else:
                         if name == "update_plan": emit("plan", args.get("steps") or [])
-                        result = self.toolbox.run(name, args)
+                        if run_accepts_cancel:
+                            result = self.toolbox.run(name, args, cancel)
+                        else:
+                            result = self.toolbox.run(name, args)
                         executed = True
                     if repeats < _MAX_IDENTICAL_CALLS:
                         last_result = result
@@ -484,19 +689,35 @@ class VIKI:
                     used.append({"name": name, "arguments": args, "result": result[:500]})
                     messages.append({"role": "tool", "tool_name": name, "content": _truncate_tool_result(result)})
                     if repeats == 2:
-                        messages.append({"role": "user", "content": (
-                            f"System note: you just called {name} with identical arguments "
-                            f"twice in a row. The last result was: {result[:400]} "
-                            "Do not keep repeating this call -- try different arguments, "
-                            "a different tool, or answer with what you have.")})
+                        defer_note = (name, result)
+                if defer_note:
+                    # Deferred until after ALL tool messages of this turn:
+                    # a note inserted mid-turn would leave later tool
+                    # messages without a preceding assistant call.
+                    dname, dresult = defer_note
+                    messages.append({"role": "user", "content": (
+                        f"System note: you just called {dname} with identical arguments "
+                        f"twice in a row. The last result was: {dresult[:400]} "
+                        "Do not keep repeating this call -- try different arguments, "
+                        "a different tool, or answer with what you have.")})
             # Out of steps: force a wrap-up with what we have.
             messages.append({"role": "user", "content": "Step limit reached. Summarize what you found and what is left."})
-            content, _, _ = self._stream(messages, None, False, emit, cancel)
-            return {"type": "text", "content": content.strip(), "tools": used, "steps": steps}
+            try:
+                content, _, _ = self._stream(messages, None, False, emit, cancel)
+            except Cancelled:
+                raise
+            except Exception:
+                content = ""
+            return {"type": "text", "content": content.strip() or _EMPTY_ANSWER_FALLBACK,
+                    "tools": used, "steps": steps}
         except Cancelled:
             return {"type": "cancelled", "content": "Stopped.", "tools": used, "steps": steps}
         except Exception as e:
-            return {"type": "error", "content": f"Could not reach the model: {e}. Is Ollama running and is '{self.model}' pulled?"}
+            # User-facing text stays generic; the detail goes to the
+            # server log only, never into a chat bubble.
+            print(f"[agent] run failed: {type(e).__name__}: {e}", file=sys.stderr)
+            return {"type": "error", "content": "Could not reach the model. Is Ollama running and is the model pulled?",
+                    "tools": used, "steps": steps}
 
     def extract_facts(self, user_messages, known=None):
         if not user_messages: return []

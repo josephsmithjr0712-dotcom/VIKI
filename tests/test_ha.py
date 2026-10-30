@@ -3,6 +3,7 @@ import copy
 import json
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,7 +28,7 @@ def fresh_cache(full=None):
              "domain": s["entity_id"].split(".")[0],
              "name": s.get("attributes", {}).get("friendly_name", s["entity_id"]),
              "state": s["state"]} for s in STATES]
-    return {"updated": "2026-10-23_09:00:00", "entities": ents,
+    return {"updated": datetime.now().isoformat(timespec="seconds"), "entities": ents,
             "full": copy.deepcopy(STATES) if full is None else full}
 
 

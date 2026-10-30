@@ -37,8 +37,26 @@ class TestRunOne(unittest.TestCase):
         self.assertEqual(outcome["result"], "checked ok")
         self.assertIsNone(outcome["error"])
         stored = s.list_tasks()[0]
-        self.assertEqual(stored["last_run"], "2026-10-28T17:20:00")
+        # Finding 14 (judgment call): a manual run of a DAILY job is a
+        # test fire — it must not stamp last_run, or it would eat the
+        # day's scheduled slot. The job still fires at its slot.
+        self.assertIsNone(stored["last_run"])
         self.assertEqual(stored["run_count"], 1)
+        fired = s.run_due(lambda j: "scheduled ok",
+                          now=datetime(2026, 10, 28, 17, 20))
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["result"], "scheduled ok")
+
+    def test_run_one_interval_job_resets_the_clock(self):
+        s = Scheduler(folder=tempfile.mkdtemp())
+        job = s.add("Poll", "interval", every_minutes=60)
+        s.run_one(job["id"], lambda j: "checked ok",
+                  now=datetime(2026, 10, 28, 17, 20))
+        # Finding 14: interval schedules are "since the last run", so
+        # a manual run DOES stamp last_run for interval jobs.
+        self.assertEqual(s.list_tasks()[0]["last_run"], "2026-10-28T17:20:00")
+        self.assertEqual(s.run_due(lambda j: "again",
+                                   now=datetime(2026, 10, 28, 17, 30)), [])
 
     def test_run_one_paused_job_stays_paused(self):
         s = Scheduler(folder=tempfile.mkdtemp())
@@ -53,6 +71,8 @@ class TestRunOne(unittest.TestCase):
         s.run_one(job["id"], lambda j: "checked ok")
         stored = s.list_tasks()[0]
         self.assertFalse(stored["enabled"])
+        # A one-shot is consumed by any run, manual or scheduled.
+        self.assertIsNotNone(stored["last_run"])
         # Fired one-shots never run again, scheduled or manual.
         self.assertEqual(s.run_due(lambda j: "again",
                                    now=datetime(2026, 10, 29, 9, 0)), [])
@@ -87,7 +107,8 @@ class TestRunTaskNowTool(unittest.TestCase):
             tools_mod.connection_check = old
         self.assertIn("Ran 'Morning' now", text)
         self.assertIn("ok", text)
-        self.assertIsNotNone(tb.scheduler.list_tasks()[0]["last_run"])
+        # Finding 14: daily manual runs do not stamp last_run.
+        self.assertIsNone(tb.scheduler.list_tasks()[0]["last_run"])
 
     def test_tool_unknown_id(self):
         tb = toolbox()
@@ -158,7 +179,8 @@ class TestTasksRunNowEndpoint(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             self.assertEqual(resp.get_json()["outcome"]["result"],
                              "panel run ok")
-            self.assertIsNotNone(sched.list_tasks()[0]["last_run"])
+            # Finding 14: daily manual runs do not stamp last_run.
+            self.assertIsNone(sched.list_tasks()[0]["last_run"])
             self.assertEqual(client.post("/api/tasks/nope/run").status_code,
                              404)
         finally:

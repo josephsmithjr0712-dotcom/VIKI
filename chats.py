@@ -33,7 +33,7 @@ def _clean_id(raw):
     return cleaned or None
 
 
-def context_history(messages, keep=20):
+def context_history(messages, keep=20, budget=None):
     """Build the history an agent turn actually sees (v0.3.8).
 
     Short threads pass through unchanged (role/content only). For a
@@ -45,6 +45,15 @@ def context_history(messages, keep=20):
     chat keeps its earlier topics instead of silently dropping them
     past the 20-message window. Pure function, no model call, so the
     summary is stable and testable.
+
+    Finding 47 (judgment call, flagged for veto): 20 messages can
+    still be huge when tool results are long, so a character budget
+    also applies — VIKI_HISTORY_CHAR_BUDGET, default 24000 chars
+    (~6k tokens, sized for a 4b local model). When the kept messages
+    exceed it, the oldest kept messages are dropped (the summary
+    entry, when present, is never dropped, and at least the newest
+    message is always kept). Pass budget explicitly to override, or
+    <= 0 to disable the budget.
     """
     try:
         keep = int(keep)
@@ -52,10 +61,15 @@ def context_history(messages, keep=20):
         keep = 20
     if keep < 1:
         keep = 1
+    if budget is None:
+        try:
+            budget = int(os.getenv("VIKI_HISTORY_CHAR_BUDGET", "24000"))
+        except (TypeError, ValueError):
+            budget = 24000
     msgs = [{"role": m.get("role", ""), "content": m.get("content", "")}
             for m in (messages or []) if isinstance(m, dict)]
     if len(msgs) <= keep:
-        return msgs
+        return _apply_budget(msgs, budget)
     older, recent = msgs[:-keep], msgs[-keep:]
     topics = []
     for m in older:
@@ -72,7 +86,24 @@ def context_history(messages, keep=20):
                    f"chat: {'; '.join(topics)}]")
     else:
         summary = f"[Summary of the {len(older)} earlier messages in this chat.]"
-    return [{"role": "system", "content": summary}] + recent
+    return [{"role": "system", "content": summary}] + _apply_budget(recent, budget)
+
+
+def _apply_budget(kept, budget):
+    """Drop the oldest kept messages until they fit ``budget`` chars.
+
+    A disabled budget (<= 0) or a fitting list passes through. At
+    least the newest message is always kept, even if it alone exceeds
+    the budget — truncating the latest user message would be worse
+    than sending a long one.
+    """
+    if not budget or budget <= 0 or not kept:
+        return kept
+    kept = list(kept)
+    total = sum(len(str(m.get("content", ""))) for m in kept)
+    while len(kept) > 1 and total > budget:
+        total -= len(str(kept.pop(0).get("content", "")))
+    return kept
 
 
 class ChatStore:

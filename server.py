@@ -103,6 +103,10 @@ def login():
         return jsonify(error="too many attempts, try again in 5 minutes"), 429
     body = request.get_json(silent=True) or {}
     pw = body.get("password", "")
+    if not isinstance(pw, str):
+        # A non-string password (JSON list/object) must count as a
+        # failed attempt, not raise out of compare_digest as a 500.
+        pw = ""
     if pw and hmac.compare_digest(pw, WEB_PASSWORD):
         session["viki_auth"] = True
         session.permanent = bool(body.get("remember"))
@@ -172,7 +176,11 @@ def _save_brief(text):
 def _run_connection_job(job):
     """Executor for scheduled jobs. 'connection-check',
     'urgent-email-check', and 'follow-up-nudges' run on their own
-    today; anything else is recorded, not silently dropped."""
+    today; anything else is recorded, not silently dropped. A blank
+    action means connection-check, matching the chat executor
+    (tools._run_job_action) — the two executors agree, by design."""
+    if not " ".join(str(job.get("action") or "").split()):
+        job = dict(job, action="connection-check")
     if job.get("action") == "follow-up-nudges":
         # Follow-up nudges (v0.3.11): inbox threads older than 2 days
         # whose newest message is not Joey's own reply get listed on
@@ -325,7 +333,7 @@ def index():
 
 @app.get("/api/state")
 def state():
-    return jsonify(model=viki.model, tools=viki.toolbox.enabled, memory=store.memory_texts(),
+    return jsonify(model=viki.model, tools=viki.toolbox.refresh_enabled(), memory=store.memory_texts(),
                    files=len(list(WORKSPACE.rglob("*"))), warning=store.warning,
                    profile=user_profile.text())
 
@@ -390,7 +398,13 @@ def chat_thread(body):
     def approve(cid_, name, args):
         ev = threading.Event(); approvals[cid_] = {"event": ev, "ok": False}
         emit("approval", {"id": cid_, "name": name, "args": args})
-        ev.wait(timeout=180)
+        # Slice the wait so Stop is honoured during an approval wait:
+        # one 180s wait would otherwise hang Stop for up to 3 minutes.
+        for _ in range(180):
+            if ev.wait(timeout=1):
+                break
+            if cancel.is_set():
+                break
         return approvals.pop(cid_, {}).get("ok", False)
 
     def work():
@@ -500,8 +514,11 @@ def tasks_create():
     action = b.get("action") or "connection-check"
     if action not in TASK_ACTIONS:
         return jsonify(error=f"unknown task action: {action!r}"), 400
+    raw_minutes = b.get("every_minutes")
+    if isinstance(raw_minutes, bool) or (isinstance(raw_minutes, float) and not raw_minutes.is_integer()):
+        return jsonify(error="every_minutes must be a whole number"), 400
     try:
-        minutes = int(b["every_minutes"]) if b.get("every_minutes") not in (None, "") else None
+        minutes = int(raw_minutes) if raw_minutes not in (None, "") else None
     except (TypeError, ValueError):
         return jsonify(error="every_minutes must be a whole number"), 400
     try:
@@ -550,8 +567,11 @@ def tasks_patch(jid):
         return jsonify(error=f"unknown task action: {b.get('action')!r}"), 400
     minutes = None
     if has_kind:
+        raw_minutes = b.get("every_minutes")
+        if isinstance(raw_minutes, bool) or (isinstance(raw_minutes, float) and not raw_minutes.is_integer()):
+            return jsonify(error="every_minutes must be a whole number"), 400
         try:
-            minutes = int(b["every_minutes"]) if b.get("every_minutes") not in (None, "") else None
+            minutes = int(raw_minutes) if raw_minutes not in (None, "") else None
         except (TypeError, ValueError):
             return jsonify(error="every_minutes must be a whole number"), 400
         try:
@@ -632,6 +652,13 @@ def brief_refresh():
 @app.post("/api/chat")
 def chat():
     body = request.get_json(force=True, silent=True) or {}
+    # Finding 35 (judgment call, flagged for veto): legacy sessions
+    # (no "chat" id) and threads are SEPARATE histories by design —
+    # a session's messages never merge into a thread and vice versa.
+    # The web UI always sends a thread id, so this split only affects
+    # direct API callers; unifying them would silently change what
+    # history those callers see, so it stays split. Both paths build
+    # their turn history through the same context_history() helper.
     if body.get("chat"):
         return chat_thread(body)
     sid = body.get("session", "default")
@@ -678,7 +705,12 @@ def chat():
     def approve(cid, name, args):
         ev = threading.Event(); approvals[cid] = {"event": ev, "ok": False}
         emit("approval", {"id": cid, "name": name, "args": args})
-        ev.wait(timeout=180)
+        # Slice the wait so Stop is honoured during an approval wait.
+        for _ in range(180):
+            if ev.wait(timeout=1):
+                break
+            if cancel.is_set():
+                break
         return approvals.pop(cid, {}).get("ok", False)
 
     def work():
@@ -733,8 +765,9 @@ def upload():
 def approve_route():
     b = request.get_json(force=True, silent=True) or {}
     a = approvals.get(b.get("id"))
-    if a:
-        a["ok"] = bool(b.get("ok")); a["event"].set()
+    if not a:
+        return jsonify(ok=False, error="unknown approval"), 404
+    a["ok"] = bool(b.get("ok")); a["event"].set()
     return jsonify(ok=True)
 
 
@@ -769,6 +802,9 @@ def tts():
         audio = speak(text)
     except Exception as e:
         return jsonify(error=f"TTS failed: {e}"), 502
+    if not audio:
+        # An empty 200 would make the web UI silently drop the sentence.
+        return jsonify(error="TTS produced no audio"), 502
     return Response(audio, mimetype="audio/mpeg", headers={"Cache-Control": "no-cache"})
 
 
@@ -785,6 +821,12 @@ _MAX_TRANSCRIBE_BYTES = 5 * 1024 * 1024  # a 30s clock utterance is ~1 MB
 
 
 def _get_transcribe_model():
+    # Finding 53(a) (judgment call, flagged for veto): the server
+    # transcribe default stays base.en — accuracy matters for the
+    # clock path (a misheard word derails the whole turn), and base.en
+    # is the model proven working on this endpoint. The local
+    # voice_loop.py loop keeps its own tiny.en default for latency;
+    # the two defaults differ on purpose, not by accident.
     global _transcribe_model
     if _transcribe_model is None:
         from faster_whisper import WhisperModel

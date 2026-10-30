@@ -12,10 +12,13 @@ The browser keeps one persistent context, so logins and cookies survive
 across tool calls within a server run. Playwright is imported lazily so
 VIKI works without it until these tools are used.
 """
+import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-WORK_DIR = Path(__file__).resolve().parent.parent / "workspace" / "browser"
+# Screenshots live under VIKI_WORKSPACE when it is set, matching the
+# toolbox workspace, instead of always landing in the repo workspace.
+WORK_DIR = Path(os.getenv("VIKI_WORKSPACE") or Path(__file__).resolve().parent.parent / "workspace") / "browser"
 _session = None
 
 MAX_URL_LEN = 2048

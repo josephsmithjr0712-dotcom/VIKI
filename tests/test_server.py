@@ -249,11 +249,11 @@ class ServerContractTest(unittest.TestCase):
             server_mod.viki = old
 
     # --- approvals / stop / reset ----------------------------------------
-    def test_approve_unknown_id_still_ok(self):
+    def test_approve_unknown_id_404(self):
         client, _ = self._login()
         r = client.post("/api/approve", json={"id": "nope", "ok": True})
-        self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(r.status_code, 404)
+        self.assertFalse(r.get_json()["ok"])
 
     def test_approve_resolves_pending(self):
         client, _ = self._login()
