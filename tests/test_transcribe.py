@@ -118,11 +118,14 @@ class _FakeWhisper:
     """Stands in for faster_whisper.WhisperModel; records constructor args."""
     last_kwargs = None
     segments = []
+    fail = None
 
     def __init__(self, *args, **kwargs):
         _FakeWhisper.last_kwargs = (args, kwargs)
 
     def transcribe(self, _path, **_kwargs):
+        if _FakeWhisper.fail is not None:
+            raise _FakeWhisper.fail
         return list(_FakeWhisper.segments), None
 
 
@@ -200,6 +203,33 @@ class TranscribeContractTest(unittest.TestCase):
                             content_type="audio/wav")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json(), {"text": ""})
+
+    def test_transcribe_failure_is_502_with_cause(self):
+        # The clock only shows a generic failure, so the 502 body must
+        # carry the cause (this is how the PyAV 19 incompatibility
+        # surfaced: av.open() rejecting faster-whisper's metadata_errors).
+        client = self._login()
+        _FakeWhisper.fail = TypeError(
+            "av.open() got an unexpected keyword argument 'metadata_errors'")
+        try:
+            with _FakeFasterWhisper():
+                r = client.post("/api/transcribe", data=_wav_bytes(),
+                                content_type="audio/wav")
+        finally:
+            _FakeWhisper.fail = None
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("metadata_errors", r.get_json()["error"])
+
+    def test_voice_requirements_pin_av_below_19(self):
+        # Regression guard for the 2026-10-29 clock outage: faster-whisper
+        # 1.2.1 declares av>=11 with no upper bound, but PyAV 19 removed
+        # the metadata_errors argument it passes to av.open().
+        reqs = (Path(__file__).resolve().parent.parent
+                / "requirements-voice.txt").read_text()
+        av_lines = [ln for ln in reqs.splitlines()
+                    if ln.startswith("av>") or ln.startswith("av==")]
+        self.assertEqual(len(av_lines), 1)
+        self.assertIn("<19", av_lines[0])
 
     @unittest.skipIf(_FW_INSTALLED,
                      "faster-whisper is installed here, so no 501 path")
