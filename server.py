@@ -815,6 +815,10 @@ def transcribe():
     except ImportError:
         return jsonify(error="faster-whisper not installed: pip install -r requirements-voice.txt"), 501
     except Exception as e:
+        # Log the cause server-side: the clock only shows a generic
+        # failure, so without this the journal shows a bare 502 and the
+        # real error (e.g. an incompatible PyAV) stays hidden.
+        app.logger.exception("transcribe model failed to load")
         return jsonify(error=f"transcription model failed to load: {e}"), 502
     tmp_path = None
     try:
@@ -825,6 +829,7 @@ def transcribe():
             segments, _info = model.transcribe(tmp_path, beam_size=1, vad_filter=True)
             text = " ".join(s.text for s in segments).strip()
     except Exception as e:
+        app.logger.exception("transcribe failed")
         return jsonify(error=f"transcription failed: {e}"), 502
     finally:
         if tmp_path:
