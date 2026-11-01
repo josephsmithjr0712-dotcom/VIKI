@@ -38,7 +38,8 @@ How you work:
 - When the user states a lasting like, dislike, hobby, or favorite, save it with update_profile so future answers fit them better. Check get_profile when tailoring a recommendation.
 - You can check the user's connections any time with check_connections (unread Gmail + today's calendar), and set up recurring checks with schedule_task (asks approval) — e.g. a morning brief.
 - Risky actions (writing files, controlling devices) ask the user for approval. If denied, adapt and offer alternatives.
-- Finish with a concise answer in plain language. Mention source URLs when you used the web. Never print raw JSON or tool schemas."""
+- Finish with a concise answer in plain language. Mention source URLs when you used the web. Never print raw JSON or tool schemas.
+- Never think aloud: do not output reasoning, deliberation, a plan narrative, or a preamble about what you are considering, in any form — tagged (<think>, <thinking>, <reasoning>) or untagged. Answer directly; any reasoning stays internal and invisible."""
 
 EXTRACT_PROMPT = (
     "You maintain the long-term memory of an AI agent. From the USER messages below, extract durable facts worth "
@@ -99,26 +100,52 @@ def _args_key(args):
         return repr(sorted((str(k), str(v)) for k, v in args.items()))
 
 
-# Tag forms, case-insensitive with optional whitespace: <think>, <Think>,
-# < think >, </think>, </ think >. A partial tag split across chunks is
-# held back, never emitted mid-tag.
-_THINK_OPEN = re.compile(r"<\s*think\s*>", re.IGNORECASE)
-_THINK_CLOSE = re.compile(r"<\s*/\s*think\s*>", re.IGNORECASE)
-# A buffer suffix that could still grow into a tag: starts with "<" and
-# contains no ">" yet, and its letters (if any) follow the think sequence.
-_PARTIAL_TAG = re.compile(r"^<\s*/?\s*t?h?i?n?k?\s*$", re.IGNORECASE)
+# Reasoning-tag forms, case-insensitive with optional whitespace:
+# <think>, <thinking>, <reasoning>, <thought>, <internal> (and their
+# closes, e.g. </think>). v0.3.38 only knew <think>; models and cloud
+# providers also emit the other spellings, and every one of them would
+# otherwise be spoken aloud on the clock. A partial tag split across
+# chunks is held back, never emitted mid-tag.
+_REASON_TAG_NAMES = ("think", "thinking", "reasoning", "thought", "internal")
+_THINK_OPEN = re.compile(
+    r"<\s*(?:think|thinking|reasoning|thought|internal)\s*>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(
+    r"<\s*/\s*(?:think|thinking|reasoning|thought|internal)\s*>", re.IGNORECASE)
 
 
 def _partial_tag_len(text):
-    """Length of the longest suffix of text that could be a partial tag."""
-    for n in range(min(len(text), 12), 0, -1):
-        if _PARTIAL_TAG.match(text[-n:]):
+    """Length of the longest suffix of text that could be a partial tag.
+
+    A suffix counts if, ignoring whitespace, it is "<", an optional "/",
+    and then a prefix (possibly empty) of one of the reasoning tag names.
+    """
+    for n in range(min(len(text), 14), 0, -1):
+        suffix = text[-n:]
+        if ">" in suffix or not suffix.startswith("<"):
+            continue
+        rest = suffix[1:].lstrip()
+        if rest.startswith("/"):
+            rest = rest[1:].lstrip()
+        letters = re.sub(r"\s+", "", rest)
+        if any(name.startswith(letters.lower()) for name in _REASON_TAG_NAMES):
             return n
     return 0
 
 
+def _strip_reasoning_blocks(text):
+    """Non-streaming scrub: drop every reasoning-tag block in full text.
+
+    Last-gate protection for the final answer (the path the clock speaks
+    when no tokens arrived): even if a chunk somehow bypassed the
+    streaming filter, the returned content is clean.
+    """
+    filt = _ThinkFilter()
+    return filt.feed(text or "") + filt.flush()
+
+
 class _ThinkFilter:
-    """Stateful stripper for <think>...</think> leaked into answer text (v0.3.38).
+    """Stateful stripper for reasoning blocks leaked into answer text (v0.3.38,
+    generalised 2026-10-31: <think>/<thinking>/<reasoning>/<thought>/<internal>).
 
     The clock speaks content tokens and ignores the thinking channel, so
     reasoning that Ollama puts into the content stream — which happens
@@ -308,6 +335,7 @@ class VIKI:
                 messages=[{"role": "user", "content": "hi"}],
                 stream=False,
                 keep_alive=-1,
+                think=False,
                 options={"num_predict": 1},
             )
             print(f"[warmup] model {self.model} pre-loaded and held in memory")
@@ -328,6 +356,12 @@ class VIKI:
             emit("status", "Cloud model doesn't expose reasoning; answering without it.")
         payload = {"model": cfg["model"], "messages": _cloud_messages(messages),
                    "stream": True, "temperature": 0.2, "top_p": 0.9}
+        if not think and cfg["base_url"] == _GEMINI_OPENAI_BASE_URL:
+            # Online/cloud fix (2026-10-31): Gemini thinks by default and
+            # its OpenAI-compatible endpoint honours thinking_budget 0
+            # as "no thinking". Generic providers get no extra field:
+            # an unknown reasoning_effort key would fail the whole turn.
+            payload["thinking_config"] = {"thinking_budget": 0}
         if tools:
             payload["tools"] = tools
         req = urllib.request.Request(
@@ -351,6 +385,10 @@ class VIKI:
                     break
                 chunk = json.loads(data)  # raises on bad payload -> fallback
                 delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                # Note: reasoning channels from online providers
+                # (reasoning_content / reasoning) are deliberately never
+                # read here — they are not answer text, whether or not
+                # this turn asked for thinking.
                 if delta.get("content"):
                     clean = filt.feed(delta["content"])
                     if clean:
@@ -475,7 +513,14 @@ class VIKI:
                     if cancel.is_set(): raise Cancelled()
                     m = chunk.message
                     if getattr(m, "thinking", None):
-                        thinking.append(m.thinking); emit("thinking", m.thinking)
+                        # Thinking channel is only surfaced when the turn
+                        # actually asked for it. With think=False a model
+                        # that leaks reasoning into this channel must not
+                        # have it shown on the web UI or handed to any
+                        # client that might speak it — it is discarded.
+                        thinking.append(m.thinking)
+                        if think:
+                            emit("thinking", m.thinking)
                     if m.content:
                         clean = filt.feed(m.content)
                         if clean:
@@ -586,7 +631,7 @@ class VIKI:
             empty_retries = 0
             while steps < self.max_steps:
                 steps += 1
-                emit("status", f"Step {steps}: thinking" if steps > 1 else "Working on it")
+                emit("status", "Working on it")
                 turn_tools = None if self.tools_ok is False else tools
                 content, thinking, calls = self._stream(messages, turn_tools, think and self.think_ok is not False, emit, cancel)
                 if thinking: self.think_ok = True
@@ -601,7 +646,10 @@ class VIKI:
                             continue
                         return {"type": "text", "content": _EMPTY_ANSWER_FALLBACK,
                                 "tools": used, "steps": steps}
-                    return {"type": "text", "content": content.strip(), "tools": used, "steps": steps}
+                    # Last gate: scrub the final answer itself, so the
+                    # clock's Done-content speech path can never speak
+                    # a reasoning block that slipped past streaming.
+                    return {"type": "text", "content": _strip_reasoning_blocks(content).strip(), "tools": used, "steps": steps}
                 emit("reset_answer", "")  # text streamed before a tool call is narration, not the answer
                 norm_calls = []
                 for c in calls:
